@@ -106,6 +106,15 @@ pub fn page(lib: &Rc<RefCell<Library>>, path: &Path, tag: &str, query: &str) -> 
     file.add(&folder);
     file.add(&property("Path", &path.to_string_lossy()));
     panel.append(&file);
+    // Destructive, so last, and confirmed first. Trash rather than delete, so it can be undone in Files
+    let trash = adw::ButtonRow::builder()
+        .title("Move to Trash")
+        .start_icon_name("user-trash-symbolic")
+        .action_name("detail.trash")
+        .build();
+    // Added, not set: setting the classes would drop the row's own `button` class
+    trash.add_css_class("destructive-action");
+    panel.append(&group(None, &trash));
 
     let near = siblings(lib, path, tag, query);
     // Opens the image, its folder, or the sidecar in other apps (GNOME's image viewer handles
@@ -226,10 +235,12 @@ pub fn page(lib: &Rc<RefCell<Library>>, path: &Path, tag: &str, query: &str) -> 
         [title.text().to_string(), tags(), urls(), note]
     };
     let saved = RefCell::new(texts());
-    let window = glib::WeakRef::<gtk::Window>::new();
+    // Shared: a cloned WeakRef is a separate reference, which setting this one would not update
+    let window = Rc::new(glib::WeakRef::<gtk::Window>::new());
     let w = window.clone();
     page.connect_map(move |page| w.set(page.root().and_downcast::<gtk::Window>().as_ref()));
     let (l, image, w, sidecar) = (lib.clone(), path.to_owned(), window.clone(), item.sidecar_path());
+    let (trashed, trash_window) = (path.to_owned(), window.clone());
     let save = gio::SimpleAction::new("save", None);
     let (lib, path) = (lib.clone(), path.to_owned());
     save.connect_activate(move |_, _| {
@@ -278,6 +289,40 @@ pub fn page(lib: &Rc<RefCell<Library>>, path: &Path, tag: &str, query: &str) -> 
         launch(&w, &sidecar, false);
     });
     actions.add_action(&edit);
+    let trash = gio::SimpleAction::new("trash", None);
+    let (image, sidecar, w, s) = (trashed, item.sidecar_path(), trash_window, save.clone());
+    trash.connect_activate(move |_, _| {
+        let Some(win) = w.upgrade() else { return };
+        let name = image.file_name().unwrap_or_default().to_string_lossy();
+        let dialog = adw::AlertDialog::new(
+            Some("Move to Trash?"),
+            Some(&format!("“{name}” and its sidecar will be moved to the trash.")),
+        );
+        dialog.add_responses(&[("cancel", "_Cancel"), ("trash", "_Move to Trash")]);
+        dialog.set_response_appearance("trash", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let (image, sidecar, s, w) = (image.clone(), sidecar.clone(), s.clone(), win.clone());
+        dialog.connect_response(Some("trash"), move |_, _| {
+            let trash = |p: &Path| match p.exists() {
+                true => gio::File::for_path(p).trash(gio::Cancellable::NONE),
+                false => Ok(()),
+            };
+            if let Err(e) = trash(&image) {
+                toast(&w, &format!("Could not move to the trash: {}", e.message()));
+                return;
+            }
+            // Never save a trashed image's edits: that would leave a sidecar behind
+            s.set_enabled(false);
+            match trash(&sidecar) {
+                Ok(()) => toast(&w, "Moved to Trash"),
+                Err(e) => toast(&w, &format!("Could not move the sidecar to the trash: {}", e.message())),
+            }
+            let _ = w.activate_action("win.reload", None);
+        });
+        dialog.present(Some(&win));
+    });
+    actions.add_action(&trash);
     page.insert_action_group("detail", Some(&actions));
     page.connect_hidden(|page| {
         let _ = page.activate_action(SAVE, None);
@@ -542,20 +587,97 @@ fn value_row(value: &str, editable: bool, setup: fn(&adw::ActionRow, &str)) -> a
         .tooltip_text("Remove")
         .valign(gtk::Align::Center)
         .css_classes(["flat", "circular"])
-        .sensitive(editable)
+        .action_name("row.remove")
         .build();
-    // Found through the widget tree rather than captured, so the button does not hold its own row.
-    // Focus then goes to the add row, since the removed row may have had it
-    remove.connect_clicked(|button| {
-        let row = button.ancestor(adw::ActionRow::static_type()).and_downcast::<adw::ActionRow>().unwrap();
-        let list = row.parent().and_downcast::<gtk::ListBox>().unwrap();
-        list.remove(&row);
-        if let Some(entry) = list.last_child() {
-            entry.grab_focus();
+    row.add_suffix(&remove);
+    add_menu(&row, value, editable);
+    row
+}
+
+/// The row's actions and context menu. The HIG asks for a set of related items, opened by
+/// secondary click, long press, or the keyboard (Menu, Shift+F10): Open (as clicking the row),
+/// Copy (also Ctrl+C), and Remove (as the ×, disabled when read-only)
+fn add_menu(row: &adw::ActionRow, value: &str, editable: bool) {
+    let actions = gio::SimpleActionGroup::new();
+    let r = row.downgrade();
+    let open = gio::SimpleAction::new("open", None);
+    open.connect_activate(move |_, _| {
+        // As a click: the row's action (a tag's gallery) and its `activated` (a URL's browser)
+        if let Some(row) = r.upgrade() {
+            WidgetExt::activate(&row);
         }
     });
-    row.add_suffix(&remove);
-    row
+    let (r, v) = (row.downgrade(), value.to_owned());
+    let copy = gio::SimpleAction::new("copy", None);
+    copy.connect_activate(move |_, _| {
+        if let Some(row) = r.upgrade() {
+            row.clipboard().set_text(&v);
+            let _ = row.activate_action("win.toast", Some(&"Copied".to_variant()));
+        }
+    });
+    let r = row.downgrade();
+    let remove = gio::SimpleAction::new("remove", None);
+    remove.set_enabled(editable);
+    // After the menu has closed. Focus then goes to the add row, since the removed row may have had it
+    remove.connect_activate(move |_, _| {
+        let Some(row) = r.upgrade() else { return };
+        glib::idle_add_local_once(move || {
+            let Some(list) = row.parent().and_downcast::<gtk::ListBox>() else { return };
+            list.remove(&row);
+            if let Some(entry) = list.last_child() {
+                entry.grab_focus();
+            }
+        });
+    });
+    for action in [open, copy, remove] {
+        actions.add_action(&action);
+    }
+    row.insert_action_group("row", Some(&actions));
+
+    let click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
+    click.connect_pressed(|gesture, _, x, y| popup_menu(gesture.widget(), Some((x, y))));
+    row.add_controller(click);
+    let press = gtk::GestureLongPress::new();
+    press.connect_pressed(|gesture, x, y| popup_menu(gesture.widget(), Some((x, y))));
+    row.add_controller(press);
+    let shortcuts = gtk::ShortcutController::new();
+    for key in ["Menu", "<Shift>F10"] {
+        let open = gtk::CallbackAction::new(|row, _| {
+            popup_menu(Some(row.clone()), None);
+            glib::Propagation::Stop
+        });
+        shortcuts.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string(key), Some(open)));
+    }
+    shortcuts.add_shortcut(gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string("<Control>c"),
+        Some(gtk::NamedAction::new("row.copy")),
+    ));
+    row.add_controller(shortcuts);
+}
+
+/// Pops up a row's context menu at the pointer, or under the row when opened from the keyboard
+fn popup_menu(row: Option<gtk::Widget>, at: Option<(f64, f64)>) {
+    let Some(row) = row else { return };
+    let main = gio::Menu::new();
+    main.append(Some("Open"), Some("row.open"));
+    main.append(Some("Copy"), Some("row.copy"));
+    let remove = gio::Menu::new();
+    remove.append(Some("Remove"), Some("row.remove"));
+    let menu = gio::Menu::new();
+    menu.append_section(None, &main);
+    menu.append_section(None, &remove);
+    let popover = gtk::PopoverMenu::builder().menu_model(&menu).has_arrow(at.is_none()).build();
+    popover.set_parent(&row);
+    if let Some((x, y)) = at {
+        popover.set_halign(gtk::Align::Start);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    }
+    // Unparented once closed (after its item has run), so rows do not collect popovers
+    popover.connect_closed(|p| {
+        let p = p.clone();
+        glib::idle_add_local_once(move || p.unparent());
+    });
+    popover.popup();
 }
 
 /// The values of a list editor's rows

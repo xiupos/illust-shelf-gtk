@@ -206,6 +206,21 @@ impl Library {
         facets
     }
 
+    /// Namespaces with the number of items that have a tag in them, most first, then by name.
+    /// Tags without a namespace count under ""
+    pub fn namespaces(&self) -> Vec<(String, usize)> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for item in &self.items {
+            let spaces: HashSet<&str> = item.tags().into_iter().map(namespace).collect();
+            for space in spaces {
+                *counts.entry(space).or_default() += 1;
+            }
+        }
+        let mut spaces: Vec<(String, usize)> = counts.into_iter().map(|(s, n)| (s.to_owned(), n)).collect();
+        spaces.sort_by(|(a, an), (b, bn)| bn.cmp(an).then_with(|| a.cmp(b)));
+        spaces
+    }
+
     /// Modifies and saves. Re-reads from disk first, so files broken or rewritten externally
     /// are never clobbered. Err if not editable. Writes nothing if unchanged. When this
     /// creates the sidecar, `added` is set to `now`. On failure, the in-memory item is restored
@@ -249,6 +264,11 @@ impl Library {
             self.items[i].reload();
         }
     }
+}
+
+/// A tag's namespace: the part before its first `:`, or "" if it has none
+pub fn namespace(tag: &str) -> &str {
+    tag.split_once(':').map_or("", |(space, _)| space)
 }
 
 /// Copies an image into `folder` as `<UUIDv7>.<ext>` (names sort by time added), with a new
@@ -633,6 +653,10 @@ mod tests {
                 facet("y", 1, &a)
             ]
         );
+        // Items per namespace: a has x and y, but counts once under ""
+        let space = |s: &str, n| (s.to_owned(), n);
+        assert_eq!(lib.namespaces(), [space("creator", 3), space("set", 3), space("", 2)]);
+        assert_eq!((namespace("creator:A:B"), namespace("x")), ("creator", ""));
     }
 
     #[test]

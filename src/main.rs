@@ -157,6 +157,12 @@ fn add_actions(app: &adw::Application, window: &adw::ApplicationWindow, win: &Rc
         }
     });
     let w = win.clone();
+    action(window, "show-namespace", string, move |param| {
+        if let Some(space) = param.and_then(|p| p.str()) {
+            w.nav.push(&namespace_page(&w, space));
+        }
+    });
+    let w = win.clone();
     action(window, "toast", string, move |param| {
         if let Some(text) = param.and_then(|p| p.str()) {
             w.toasts.add_toast(adw::Toast::new(text));
@@ -451,7 +457,7 @@ fn root_page(win: &Rc<Win>) -> adw::NavigationPage {
     let stack = adw::ViewStack::new();
     let gallery = gallery(&lib, None, &entry);
     stack.add_titled_with_icon(&gallery, Some("gallery"), "Illustrations", "image-x-generic-symbolic");
-    let tags = tag_grid(&lib, &entry);
+    let tags = tag_sections(&lib, &entry);
     stack.add_titled_with_icon(&tags, Some("tags"), "Tags", "user-bookmarks-symbolic");
 
     let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
@@ -475,6 +481,14 @@ fn root_page(win: &Rc<Win>) -> adw::NavigationPage {
     narrow.add_setter(&switcher, "visible", Some(&false.to_value()));
     bin.add_breakpoint(narrow);
     page
+}
+
+/// All tags of one namespace ("" for tags without one). Has its own header and search bar
+fn namespace_page(win: &Rc<Win>, space: &str) -> adw::NavigationPage {
+    let lib = win.lib.borrow().clone();
+    let entry = gtk::SearchEntry::builder().placeholder_text("Search").build();
+    let grid = tag_grid(&lib, &entry, Some(space.to_owned()));
+    searchable_page(&space_title(space), &adw::HeaderBar::new(), &entry, &grid)
 }
 
 /// Gallery of one tag. Has its own header and search bar
@@ -575,13 +589,26 @@ fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(child).build()
 }
 
-/// The tags as tiles showing each tag's cover image, like pixiv's tag search. Searching filters
-/// them by name, so `creator:` shows the creators. Rebuilt every time it is shown
-fn tag_grid(lib: &Rc<RefCell<Library>>, entry: &gtk::SearchEntry) -> gtk::Stack {
-    // Tag → (count, cover), and the tags in order, from the last time the grid was shown
-    type Facets = (HashMap<String, (usize, PathBuf)>, Vec<String>);
-    let facets: Rc<RefCell<Facets>> = Rc::default();
-    let list = gtk::StringList::new(&[]);
+/// Tag → (count, cover image), from the last time the view was shown
+type TagInfo = Rc<RefCell<HashMap<String, (usize, PathBuf)>>>;
+
+/// Fills `info` and returns the tags, most used first
+fn load_tags(lib: &Rc<RefCell<Library>>, info: &TagInfo) -> Vec<String> {
+    let mut info = info.borrow_mut();
+    info.clear();
+    let facets = lib.borrow().facets();
+    facets
+        .into_iter()
+        .map(|(tag, count, cover)| {
+            info.insert(tag.clone(), (count, cover));
+            tag
+        })
+        .collect()
+}
+
+/// Tag tiles like pixiv's tag search: the tag's cover image, a dark gradient, "#tag", and its count.
+/// `short` drops the namespace from the label, where a heading or title already names it
+fn tag_factory(lib: &Rc<RefCell<Library>>, info: &TagInfo, short: bool) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, obj| {
         let picture = gtk::Picture::builder()
@@ -613,54 +640,175 @@ fn tag_grid(lib: &Rc<RefCell<Library>>, entry: &gtk::SearchEntry) -> gtk::Stack 
         tile.add_overlay(&text);
         obj.downcast_ref::<gtk::ListItem>().unwrap().set_child(Some(&tile));
     });
-    let (l, f) = (lib.clone(), facets.clone());
+    let (l, info) = (lib.clone(), info.clone());
     factory.connect_bind(move |_, obj| {
         let item = obj.downcast_ref::<gtk::ListItem>().unwrap();
         let tag = item.item().and_downcast::<gtk::StringObject>().unwrap().string();
         let tile = item.child().and_downcast::<gtk::Overlay>().unwrap();
-        let Some((count, cover)) = f.borrow().0.get(tag.as_str()).cloned() else { return };
+        let Some((count, cover)) = info.borrow().get(tag.as_str()).cloned() else { return };
         tile.child().and_downcast::<gtk::Picture>().unwrap().set_filename(Some(l.borrow().thumb(&cover)));
         let text = tile.last_child().unwrap();
         let tag_label = text.first_child().and_downcast::<gtk::Label>().unwrap();
-        tag_label.set_label(&format!("#{tag}"));
+        let name =
+            if short { tag.split_once(':').map_or(tag.as_str(), |(_, name)| name) } else { tag.as_str() };
+        tag_label.set_label(&format!("#{name}"));
         tag_label.next_sibling().and_downcast::<gtk::Label>().unwrap().set_label(&count.to_string());
         tile.set_tooltip_text(Some(&tag));
     });
-    let grid = tile_grid(&list, &factory);
+    factory
+}
+
+/// A grid of tag tiles; activating one opens its gallery
+fn tag_tiles(list: &gtk::StringList, factory: &gtk::SignalListItemFactory) -> gtk::GridView {
+    let grid = tile_grid(list, factory);
     let l = list.clone();
     grid.connect_activate(move |grid, pos| {
         if let Some(tag) = l.string(pos) {
             let _ = grid.activate_action("win.show-scope", Some(&tag.to_variant()));
         }
     });
-    let stack = no_results(&scrolled(&grid));
+    grid
+}
+
+/// Every tag, or those of one namespace ("" for tags without one), as tiles. Searching filters
+/// them by name, so `creator:` shows the creators. Rebuilt every time it is shown
+fn tag_grid(lib: &Rc<RefCell<Library>>, entry: &gtk::SearchEntry, space: Option<String>) -> gtk::Stack {
+    let info: TagInfo = Rc::default();
+    let tags: Rc<RefCell<Vec<String>>> = Rc::default();
+    let list = gtk::StringList::new(&[]);
+    let stack = no_results(&scrolled(&tag_tiles(&list, &tag_factory(lib, &info, space.is_some()))));
 
     // Weak: the stack's map handler holds `update`
-    let (f, st) = (facets.clone(), stack.downgrade());
+    let (t, st) = (tags.clone(), stack.downgrade());
     let update = Rc::new(move |entry: &gtk::SearchEntry| {
         let query = entry.text().trim().to_lowercase();
-        let facets = f.borrow();
-        let tags: Vec<&str> =
-            facets.1.iter().map(String::as_str).filter(|t| t.to_lowercase().contains(&query)).collect();
-        list.splice(0, list.n_items(), &tags);
+        let tags = t.borrow();
+        let shown: Vec<&str> =
+            tags.iter().map(String::as_str).filter(|t| t.to_lowercase().contains(&query)).collect();
+        list.splice(0, list.n_items(), &shown);
         if let Some(st) = st.upgrade() {
-            show_results(&st, !tags.is_empty());
+            show_results(&st, !shown.is_empty());
         }
     });
     let u = update.clone();
     entry.connect_search_changed(move |entry| u(entry));
     let (lib, weak) = (lib.clone(), entry.downgrade());
     stack.connect_map(move |_| {
-        let mut f = facets.borrow_mut();
-        f.0.clear();
-        f.1.clear();
-        for (tag, count, cover) in lib.borrow().facets() {
-            f.1.push(tag.clone());
-            f.0.insert(tag, (count, cover));
+        let mut all = load_tags(&lib, &info);
+        if let Some(space) = &space {
+            all.retain(|t| model::namespace(t) == space);
         }
-        drop(f);
+        *tags.borrow_mut() = all;
         if let Some(entry) = weak.upgrade() {
             update(&entry);
+        }
+    });
+    stack
+}
+
+/// "Creator" for `creator:`; "Other Tags" for tags without a namespace
+fn space_title(space: &str) -> String {
+    let mut chars = space.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => "Other Tags".into(),
+    }
+}
+
+/// The Tags tab: a section per namespace (most used first, tags without one last), each a header
+/// that opens all its tags and one row of its most used tags, as many as fit. While searching, a
+/// flat grid of every matching tag instead. Rebuilt every time it is shown
+fn tag_sections(lib: &Rc<RefCell<Library>>, entry: &gtk::SearchEntry) -> gtk::Stack {
+    let info: TagInfo = Rc::default();
+    let factory = tag_factory(lib, &info, true);
+    let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_bottom(12).build();
+    let sections_view = scrolled(&column);
+    // Each section's grid, its shown tags, and all its tags
+    type Sections = Rc<RefCell<Vec<(gtk::GridView, gtk::StringList, Vec<String>)>>>;
+    let sections: Sections = Rc::default();
+    let zoom = Rc::new(std::cell::Cell::new(DEFAULT_ZOOM));
+    // One row per section, by the grid's own column rule: tiles at least the zoom wide plus 6 px
+    // padding, inside 12 px of grid padding. Weak: the adjustment's handler holds this
+    let (s, z, h) = (sections.clone(), zoom.clone(), sections_view.hadjustment().downgrade());
+    let fit = Rc::new(move || {
+        let Some(h) = h.upgrade() else { return };
+        let n = ((h.page_size() as u32).saturating_sub(12) / (z.get() + 6)).max(1);
+        for (grid, list, tags) in s.borrow().iter() {
+            // Only a maximum: a minimum would fix the grid's width, and the view could not shrink
+            grid.set_max_columns(n);
+            let shown: Vec<&str> = tags.iter().take(n as usize).map(String::as_str).collect();
+            list.splice(0, list.n_items(), &shown);
+        }
+    });
+    let f = fit.clone();
+    sections_view.hadjustment().connect_page_size_notify(move |_| f());
+
+    let stack = gtk::Stack::new();
+    stack.add_named(&sections_view, Some("sections"));
+    stack.add_named(&tag_grid(lib, entry, None), Some("search"));
+    let st = stack.clone();
+    let show = move |entry: &gtk::SearchEntry| {
+        st.set_visible_child_name(if entry.text().trim().is_empty() { "sections" } else { "search" });
+    };
+    entry.connect_search_changed(show.clone());
+
+    // The zoom changes the fit; follow the window's zoom action while shown
+    let handler: Rc<RefCell<Option<(gio::SimpleAction, glib::SignalHandlerId)>>> = Rc::default();
+    let (lib, weak, h) = (lib.clone(), entry.downgrade(), handler.clone());
+    sections_view.connect_map(move |view| {
+        while let Some(child) = column.first_child() {
+            column.remove(&child);
+        }
+        let all = load_tags(&lib, &info);
+        let mut spaces = lib.borrow().namespaces();
+        // Tags without a namespace go last
+        spaces.sort_by_key(|(space, _)| space.is_empty());
+        let mut s = sections.borrow_mut();
+        s.clear();
+        for (space, _) in spaces {
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            content
+                .append(&gtk::Label::builder().label(space_title(&space)).css_classes(["title-4"]).build());
+            content.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let header = gtk::Button::builder()
+                .child(&content)
+                .halign(gtk::Align::Start)
+                .margin_start(6)
+                .margin_top(12)
+                .css_classes(["flat"])
+                .action_name("win.show-namespace")
+                .action_target(&space.to_variant())
+                .build();
+            let list = gtk::StringList::new(&[]);
+            let grid = tag_tiles(&list, &factory);
+            column.append(&header);
+            column.append(&grid);
+            let tags = all.iter().filter(|t| model::namespace(t) == space).cloned().collect();
+            s.push((grid, list, tags));
+        }
+        drop(s);
+        let action = view
+            .root()
+            .and_downcast::<gtk::ApplicationWindow>()
+            .and_then(|w| w.lookup_action("zoom"))
+            .and_downcast::<gio::SimpleAction>();
+        if let Some(action) = action {
+            zoom.set(action.state().and_then(|v| v.get::<u32>()).unwrap_or(DEFAULT_ZOOM));
+            let (z, f) = (zoom.clone(), fit.clone());
+            let id = action.connect_state_notify(move |action| {
+                z.set(action.state().and_then(|v| v.get::<u32>()).unwrap_or(DEFAULT_ZOOM));
+                f();
+            });
+            h.replace(Some((action, id)));
+        }
+        fit();
+        if let Some(entry) = weak.upgrade() {
+            show(&entry);
+        }
+    });
+    sections_view.connect_unmap(move |_| {
+        if let Some((action, id)) = handler.take() {
+            action.disconnect(id);
         }
     });
     stack
