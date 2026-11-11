@@ -45,12 +45,14 @@ pub fn page(lib: &Rc<RefCell<Library>>, path: &Path, tag: &str, query: &str) -> 
     panel.append(&group(None, &title));
 
     // Tag rows open the tag's gallery; URL rows open the browser
-    let (tags_group, tags) = list_editor("Tags", "Add Tag", item.tags(), editable, |row, tag| {
+    // Typing a tag suggests the most used existing tag that starts with it
+    let known: Vec<String> = lib.borrow().facets().into_iter().map(|(tag, _, _)| tag).collect();
+    let (tags_group, tags) = list_editor("Tags", "Add Tag", item.tags(), known, editable, |row, tag| {
         row.set_action_name(Some("win.show-scope"));
         row.set_action_target_value(Some(&tag.to_variant()));
     });
     panel.append(&tags_group);
-    let (urls_group, urls) = list_editor("Sources", "Add URL", item.urls(), editable, |row, _| {
+    let (urls_group, urls) = list_editor("Sources", "Add URL", item.urls(), vec![], editable, |row, _| {
         row.set_title_lines(1);
         row.add_suffix(&gtk::Image::from_icon_name("adw-external-link-symbolic"));
         row.connect_activated(|row| {
@@ -452,12 +454,14 @@ fn group(title: Option<&str>, child: &impl IsA<gtk::Widget>) -> adw::Preferences
     group
 }
 
-/// A boxed list with one removable row per value and a last row to add one. The rows hold the
-/// state: the returned closure gives the values one per line, including unsubmitted input
+/// A boxed list with one removable row per value and a last row to add one, which suggests
+/// `known` values. The rows hold the state: the returned closure gives the values one per
+/// line, including unsubmitted input
 fn list_editor(
     title: &str,
     add: &str,
     values: Vec<&str>,
+    known: Vec<String>,
     editable: bool,
     setup: fn(&adw::ActionRow, &str),
 ) -> (adw::PreferencesGroup, impl Fn() -> String + use<>) {
@@ -475,10 +479,59 @@ fn list_editor(
         }
         entry.set_text("");
     });
+    if !known.is_empty() {
+        complete(&entry, known);
+    }
     list.append(&entry);
     let (l, e) = (list.clone(), entry.clone());
     let text = move || [rows(&l), vec![e.text().to_string()]].concat().join("\n");
     (group(Some(title), &list), text)
+}
+
+/// Completion that never edits the text while typing: the first `known` value that starts with
+/// the text (ignoring case, skipping values already in the list) is shown in the row's title, as
+/// "Tab: value", and Tab fills it in. Editing the text from code resets the input method, and fcitx5 answers
+/// asynchronously, so any such edit could land on a preedit that has just begun and commit it
+/// unconverted. Only Tab, pressed with no preedit shown, writes the text
+fn complete(entry: &adw::EntryRow, known: Vec<String>) {
+    let title = entry.title();
+    let found: Rc<RefCell<Option<String>>> = Rc::default();
+    let f = found.clone();
+    entry.connect_changed(move |entry| {
+        let text = entry.text().trim().to_lowercase();
+        let taken = entry.parent().and_downcast::<gtk::ListBox>().map(|l| rows(&l)).unwrap_or_default();
+        let next = (!text.is_empty())
+            .then(|| {
+                known.iter().find(|k| {
+                    k.to_lowercase().starts_with(&text) && **k != entry.text() && !taken.contains(k)
+                })
+            })
+            .flatten();
+        entry.set_title(&next.map_or(title.to_string(), |n| format!("Tab: {n}")));
+        *f.borrow_mut() = next.cloned();
+    });
+    // Whether an input method preedit is shown, on the row's inner text widget
+    let composing = Rc::new(std::cell::Cell::new(false));
+    if let Some(text) = entry.delegate().and_downcast::<gtk::Text>() {
+        let c = composing.clone();
+        text.connect_preedit_changed(move |_, preedit| c.set(!preedit.is_empty()));
+    }
+    // Tab fills in the suggestion instead of moving focus
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let e = entry.downgrade();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        let value = found.borrow().clone();
+        match (value, e.upgrade()) {
+            (Some(value), Some(entry)) if key == gdk::Key::Tab && !composing.get() => {
+                entry.set_text(&value);
+                entry.set_position(-1);
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        }
+    });
+    entry.add_controller(keys);
 }
 
 fn value_row(value: &str, editable: bool, setup: fn(&adw::ActionRow, &str)) -> adw::ActionRow {

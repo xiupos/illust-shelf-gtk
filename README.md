@@ -52,9 +52,9 @@ cargo test
 ## Usage
 
 - On first launch, use "Choose Folder" (Ctrl+O) to pick the folder with your illustrations. Subfolders are included. To view illustrations stored elsewhere, put symlinks to them in that folder.
-- To add images, use the + button at the top left of the main page or drop image files on the window. They are copied into the folder under a UUIDv7 name that keeps the extension (e.g. `01a1bb29-12c8-73cb-af91-748ad016aacc.JPG`, so names sort by when they were added), each with a new sidecar holding only `v` and `added`.
+- To add images, use the + button at the top left of the main page or drop image files on the window. They are copied into the folder under a UUIDv7 name that keeps the extension (e.g. `01a1bb29-12c8-73cb-af91-748ad016aacc.JPG`, so names sort by when they were added), each with a new sidecar holding only `v` and `added`. Ctrl+V on the main page pastes too: copied image files are added as they are, and copied image data (a screenshot, an image copied in a browser) is saved as PNG.
 - Supported formats are png, jpg, jpeg, webp, and gif. Hidden files and `*.sync-conflict-*` files are skipped.
-- On the detail page you can edit the title, tags, source URLs, and note. Tags and URLs are lists: remove one with ×, add one in the last row. Clicking a tag opens its gallery; clicking a URL opens it in the browser. Changes are saved once, when you leave the page, reload, or close the window. Fields you did not change are left as they are on disk, so you can also edit the sidecar in a text editor.
+- On the detail page you can edit the title, tags, source URLs, and note. Tags and URLs are lists: remove one with ×, add one in the last row. While you type a tag, the most used existing tag that starts with it is shown above the text ("Tab: creator:Alice"); press Tab to fill it in. Enter adds what you typed. Clicking a tag opens its gallery; clicking a URL opens it in the browser. Changes are saved once, when you leave the page, reload, or close the window. Fields you did not change are left as they are on disk, so you can also edit the sidecar in a text editor.
 - On the detail page, the menu (☰) opens the image in your image viewer (for zooming), opens its folder in Files, or opens the sidecar in your text editor (creating it if needed).
 - Creators, ratings, age ratings, and works are plain tags: `creator:Name`, `rating:1`–`rating:5`, `age:general` / `age:sensitive` / `age:questionable` / `age:explicit`, and `set:Work`. The app treats them all alike: the Tags tab shows every tag as a tile with its newest image (a `set:` shows its first page), and typing a prefix such as `creator:` in the search narrows it to that kind. A `set:` gallery is in file name order; all others show the newest files first.
 - The detail page is laid out like GNOME's Image Viewer: the (i) button (or F9) shows the details pane, on the right or, in a narrow window, below the image. Moving the mouse shows previous / next buttons at the bottom left; they, or Left / Right, step to the previous or next image in the gallery you came from: search results, a tag's gallery, or a `set:` in file name order.
@@ -66,6 +66,7 @@ cargo test
 | Ctrl+R | Reload |
 | Ctrl+Plus / Ctrl+Minus / Ctrl+0 | Thumbnail size |
 | Ctrl+O | Choose folder |
+| Ctrl+V | Add images from the clipboard (on the main page) |
 | Left / Right | Previous / next image (on the detail page) |
 | F9 | Show or hide the details pane (the (i) button) |
 | F11 | Fullscreen (on the detail page; Escape leaves it) |

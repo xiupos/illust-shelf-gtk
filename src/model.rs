@@ -258,13 +258,27 @@ pub fn import(folder: &Path, src: &Path, now: &str) -> io::Result<PathBuf> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a supported image"));
     }
     let ext = src.extension().unwrap_or_default().to_string_lossy();
+    add(folder, &ext, now, |tmp| fs::copy(src, tmp).map(drop))
+}
+
+/// Saves PNG data (a pasted image) into `folder` as `<UUIDv7>.png`, like `import`
+pub fn import_png(folder: &Path, png: &[u8], now: &str) -> io::Result<PathBuf> {
+    add(folder, "png", now, |tmp| fs::write(tmp, png))
+}
+
+fn add(
+    folder: &Path,
+    ext: &str,
+    now: &str,
+    write: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
     let dst = folder.join(format!("{}.{ext}", uuid::Uuid::now_v7()));
     // Practically never, but never overwrite
     if dst.exists() || sidecar_path(&dst).exists() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "the name is taken"));
     }
     let tmp = temp_path(&dst);
-    if let Err(e) = fs::copy(src, &tmp).and_then(|_| fs::rename(&tmp, &dst)) {
+    if let Err(e) = write(&tmp).and_then(|_| fs::rename(&tmp, &dst)) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
@@ -672,6 +686,11 @@ mod tests {
         fs::write(src.join("c.txt"), "x").unwrap();
         assert!(import(&dst, &src.join("c.txt"), NOW).is_err());
         assert_eq!(fs::read_dir(&dst).unwrap().count(), 4);
+        // Pasted PNG data is saved as <UUIDv7>.png
+        let pasted = import_png(&dst, b"png bytes", NOW).unwrap();
+        assert_eq!(pasted.extension().unwrap(), "png");
+        assert_eq!(fs::read(&pasted).unwrap(), b"png bytes");
+        assert!(read(&pasted).unwrap().contains(NOW));
     }
 
     #[test]

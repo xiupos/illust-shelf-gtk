@@ -105,6 +105,20 @@ fn add_actions(app: &adw::Application, window: &adw::ApplicationWindow, win: &Rc
     action(window, "choose-folder", None, move |_| choose_folder(&w));
     let w = win.clone();
     action(window, "add-images", None, move |_| choose_images(&w));
+    // Ctrl+V on the top page adds images from the clipboard. On the window, in the bubble phase, so
+    // it also works with nothing focused, and a focused text field pastes text instead
+    let w = win.clone();
+    let ctrl_v = gtk::CallbackAction::new(move |_, _| {
+        if w.nav.navigation_stack().n_items() != 1 {
+            return glib::Propagation::Proceed;
+        }
+        paste(&w);
+        glib::Propagation::Stop
+    });
+    let shortcuts = gtk::ShortcutController::new();
+    shortcuts
+        .add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("<Control>v"), Some(ctrl_v)));
+    window.add_controller(shortcuts);
     // Images dropped anywhere on the window are added too
     let drop = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
     let w = win.clone();
@@ -279,20 +293,38 @@ fn choose_images(win: &Rc<Win>) {
 }
 
 /// Copies the images into the folder, each with an empty sidecar (`v` and `added`), then reloads
+/// An image to add: a file to copy, or PNG data pasted from the clipboard
+enum Source {
+    File(PathBuf),
+    Png(Vec<u8>),
+}
+
 fn add_images(win: &Rc<Win>, files: Vec<PathBuf>) {
+    add_sources(win, files.into_iter().map(Source::File).collect());
+}
+
+/// Copies or saves the images into the folder, each with an empty sidecar (`v` and `added`), then
+/// reloads
+fn add_sources(win: &Rc<Win>, sources: Vec<Source>) {
     let Some(folder) = win.config.borrow().folder.clone() else {
         win.toasts.add_toast(adw::Toast::new("Choose a folder first"));
         return;
     };
-    let (win, now, total) = (win.clone(), detail::now(), files.len());
+    let (win, now, total) = (win.clone(), detail::now(), sources.len());
     glib::spawn_future_local(async move {
         // The first failure, as "name: error"
         let result = gio::spawn_blocking(move || {
-            let errors: Vec<String> = files
+            let errors: Vec<String> = sources
                 .iter()
-                .filter_map(|f| {
-                    let e = model::import(&folder, f, &now).err()?;
-                    Some(format!("{}: {e}", f.file_name().unwrap_or_default().to_string_lossy()))
+                .filter_map(|source| {
+                    let (name, result) = match source {
+                        Source::File(f) => (
+                            f.file_name().unwrap_or_default().to_string_lossy(),
+                            model::import(&folder, f, &now),
+                        ),
+                        Source::Png(png) => ("Pasted image".into(), model::import_png(&folder, png, &now)),
+                    };
+                    Some(format!("{name}: {}", result.err()?))
                 })
                 .collect();
             (errors.len(), errors.into_iter().next())
@@ -306,6 +338,31 @@ fn add_images(win: &Rc<Win>, files: Vec<PathBuf>) {
             Some(e) => format!("Added {added}, {failed} failed. {e}"),
         };
         win.toasts.add_toast(adw::Toast::new(&message));
+    });
+}
+
+/// Adds copied image files as they are, or else copied image data as PNG
+fn paste(win: &Rc<Win>) {
+    let clipboard = win.nav.clipboard();
+    let win = win.clone();
+    glib::spawn_future_local(async move {
+        // Another app's clipboard lists only MIME types; add the types GTK can read them as
+        let formats = clipboard.formats().union_deserialize_types();
+        let sources = if formats.contains_type(gtk::gdk::FileList::static_type()) {
+            let value =
+                clipboard.read_value_future(gtk::gdk::FileList::static_type(), glib::Priority::DEFAULT).await;
+            let files = value.ok().and_then(|v| v.get::<gtk::gdk::FileList>().ok());
+            files.map(|f| f.files().iter().filter_map(|f| f.path()).map(Source::File).collect())
+        } else if formats.contains_type(gtk::gdk::Texture::static_type()) {
+            let texture = clipboard.read_texture_future().await.ok().flatten();
+            texture.map(|t| vec![Source::Png(t.save_to_png_bytes().to_vec())])
+        } else {
+            None
+        };
+        match sources {
+            Some(sources) if !sources.is_empty() => add_sources(&win, sources),
+            _ => win.toasts.add_toast(adw::Toast::new("No image to paste")),
+        }
     });
 }
 
