@@ -439,7 +439,7 @@ fn texture(path: &Path) -> Option<gdk::Texture> {
 }
 
 /// Current local time in ISO 8601 with an offset, for `added`
-fn now() -> String {
+pub fn now() -> String {
     glib::DateTime::now_local().and_then(|d| d.format("%FT%T%:z")).map(|s| s.to_string()).unwrap_or_default()
 }
 

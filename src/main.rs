@@ -103,6 +103,17 @@ fn add_actions(app: &adw::Application, window: &adw::ApplicationWindow, win: &Rc
     action(window, "reload", None, move |_| reload(&w));
     let w = win.clone();
     action(window, "choose-folder", None, move |_| choose_folder(&w));
+    let w = win.clone();
+    action(window, "add-images", None, move |_| choose_images(&w));
+    // Images dropped anywhere on the window are added too
+    let drop = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
+    let w = win.clone();
+    drop.connect_drop(move |_, value, _, _| {
+        let Ok(files) = value.get::<gtk::gdk::FileList>() else { return false };
+        add_images(&w, files.files().iter().filter_map(|f| f.path()).collect());
+        true
+    });
+    window.add_controller(drop);
     // (path, tag, query): the tag ("" for all) and query of the gallery it was opened from, so
     // the detail page can step through the same list. show-sibling replaces the detail page
     let item = Some(glib::VariantTy::new("(sss)").unwrap());
@@ -248,6 +259,56 @@ fn choose_folder(win: &Rc<Win>) {
 }
 
 /// Called on startup, Ctrl+R, and folder changes. Replaces the whole screen
+fn choose_images(win: &Rc<Win>) {
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("Images"));
+    for ext in model::EXTENSIONS {
+        filter.add_suffix(ext);
+    }
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    let dialog = gtk::FileDialog::builder().title("Add Images").modal(true).filters(&filters).build();
+    let parent = win.nav.root().and_downcast::<gtk::Window>();
+    let win = win.clone();
+    dialog.open_multiple(parent.as_ref(), gio::Cancellable::NONE, move |result| {
+        if let Ok(files) = result {
+            let files = files.iter::<gio::File>().filter_map(|f| f.ok()?.path()).collect();
+            add_images(&win, files);
+        }
+    });
+}
+
+/// Copies the images into the folder, each with an empty sidecar (`v` and `added`), then reloads
+fn add_images(win: &Rc<Win>, files: Vec<PathBuf>) {
+    let Some(folder) = win.config.borrow().folder.clone() else {
+        win.toasts.add_toast(adw::Toast::new("Choose a folder first"));
+        return;
+    };
+    let (win, now, total) = (win.clone(), detail::now(), files.len());
+    glib::spawn_future_local(async move {
+        // The first failure, as "name: error"
+        let result = gio::spawn_blocking(move || {
+            let errors: Vec<String> = files
+                .iter()
+                .filter_map(|f| {
+                    let e = model::import(&folder, f, &now).err()?;
+                    Some(format!("{}: {e}", f.file_name().unwrap_or_default().to_string_lossy()))
+                })
+                .collect();
+            (errors.len(), errors.into_iter().next())
+        })
+        .await;
+        let (failed, first) = result.unwrap_or((total, None));
+        reload(&win);
+        let added = total - failed;
+        let message = match first {
+            None => format!("Added {added} image{}", if added == 1 { "" } else { "s" }),
+            Some(e) => format!("Added {added}, {failed} failed. {e}"),
+        };
+        win.toasts.add_toast(adw::Toast::new(&message));
+    });
+}
+
 fn reload(win: &Rc<Win>) {
     save_visible(win);
     let loading = loading_page();
@@ -339,6 +400,12 @@ fn root_page(win: &Rc<Win>) -> adw::NavigationPage {
     let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&switcher));
+    let add = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add Images")
+        .action_name("win.add-images")
+        .build();
+    header.pack_start(&add);
     header.pack_end(&menu_button());
     let page = searchable_page("Illust Viewer", &header, &entry, &stack);
 

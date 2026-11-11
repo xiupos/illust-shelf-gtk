@@ -52,6 +52,7 @@ cargo test
 ## Usage
 
 - On first launch, use "Choose Folder" (Ctrl+O) to pick the folder with your illustrations. Subfolders are included. To view illustrations stored elsewhere, put symlinks to them in that folder.
+- To add images, use the + button at the top left of the main page or drop image files on the window. They are copied into the folder under a UUIDv7 name that keeps the extension (e.g. `01a1bb29-12c8-73cb-af91-748ad016aacc.JPG`, so names sort by when they were added), each with a new sidecar holding only `v` and `added`.
 - Supported formats are png, jpg, jpeg, webp, and gif. Hidden files and `*.sync-conflict-*` files are skipped.
 - On the detail page you can edit the title, tags, source URLs, and note. Tags and URLs are lists: remove one with ×, add one in the last row. Clicking a tag opens its gallery; clicking a URL opens it in the browser. Changes are saved once, when you leave the page, reload, or close the window. Fields you did not change are left as they are on disk, so you can also edit the sidecar in a text editor.
 - On the detail page, the menu (☰) opens the image in your image viewer (for zooming), opens its folder in Files, or opens the sidecar in your text editor (creating it if needed).

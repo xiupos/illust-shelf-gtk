@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
+pub const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
 const THUMB_SIZE: u32 = 512;
 /// Galleries of tags with this prefix are sorted by file name
 const SET: &str = "set:";
@@ -74,9 +74,7 @@ impl Item {
     }
 
     pub fn sidecar_path(&self) -> PathBuf {
-        let mut s = self.path.as_os_str().to_owned();
-        s.push(".json");
-        PathBuf::from(s)
+        sidecar_path(&self.path)
     }
 
     /// The field as editable text. Lists are joined with newlines
@@ -251,6 +249,33 @@ impl Library {
             self.items[i].reload();
         }
     }
+}
+
+/// Copies an image into `folder` as `<UUIDv7>.<ext>` (names sort by time added), with a new
+/// sidecar `{"v":1,"added":now}`. Returns the copy's path
+pub fn import(folder: &Path, src: &Path, now: &str) -> io::Result<PathBuf> {
+    if !is_image(src) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a supported image"));
+    }
+    let ext = src.extension().unwrap_or_default().to_string_lossy();
+    let dst = folder.join(format!("{}.{ext}", uuid::Uuid::now_v7()));
+    // Practically never, but never overwrite
+    if dst.exists() || sidecar_path(&dst).exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "the name is taken"));
+    }
+    let tmp = temp_path(&dst);
+    if let Err(e) = fs::copy(src, &tmp).and_then(|_| fs::rename(&tmp, &dst)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    write_json(&sidecar_path(&dst), &json!({"v": 1, "added": now}))?;
+    Ok(dst)
+}
+
+fn sidecar_path(image: &Path) -> PathBuf {
+    let mut s = image.as_os_str().to_owned();
+    s.push(".json");
+    PathBuf::from(s)
 }
 
 fn scan(
@@ -622,6 +647,31 @@ mod tests {
         sidecar(&fine, "{oops");
         assert!(lib.edit(&fine, NOW, |it| it.set_text("title", "x")).is_err());
         assert_eq!(read(&fine).unwrap(), "{oops");
+    }
+
+    #[test]
+    fn import_copies_with_an_empty_sidecar() {
+        let src = tmpdir("import-src");
+        let dst = tmpdir("import-dst");
+        let a = src.join("a.JPG");
+        image::RgbImage::new(4, 4).save_with_format(&a, image::ImageFormat::Jpeg).unwrap();
+        sidecar(&a, r#"{"v":1,"title":"not copied"}"#);
+        let first = import(&dst, &a, NOW).unwrap();
+        let second = import(&dst, &a, NOW).unwrap();
+        // <UUIDv7>.<original extension>, in the order added
+        let stem = |p: &Path| p.file_stem().unwrap().to_str().unwrap().to_owned();
+        for p in [&first, &second] {
+            let id = uuid::Uuid::parse_str(&stem(p)).unwrap();
+            assert_eq!(id.get_version_num(), 7);
+            assert_eq!(p.extension().unwrap(), "JPG");
+            assert_eq!(fs::read(p).unwrap(), fs::read(&a).unwrap());
+            assert_eq!(read(p).unwrap(), format!("{{\n  \"v\": 1,\n  \"added\": \"{NOW}\"\n}}\n"));
+        }
+        assert!(stem(&first) < stem(&second));
+        // Not an image: nothing is copied, and no temporary files are left
+        fs::write(src.join("c.txt"), "x").unwrap();
+        assert!(import(&dst, &src.join("c.txt"), NOW).is_err());
+        assert_eq!(fs::read_dir(&dst).unwrap().count(), 4);
     }
 
     #[test]

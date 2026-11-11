@@ -6,7 +6,7 @@ Where these notes and the spec disagree, the spec wins.
 ## Current state
 
 - The schema was simplified on 2026-11-11 (still `v: 1`): `creators`, `stars`, `age`, and `page` became tags (`creator:`, `rating:`, `age:`, `set:`). The app handles only `title`, `tags`, `urls`, and `note`; `added` is set when a sidecar is created; everything else (including the retired keys) is kept as unknown keys.
-- `cargo test` (7 tests), `cargo build --release`, and `cargo clippy --all-targets` pass with no warnings. Non-test code is 1485 lines (model 389, main 556, detail 540).
+- `cargo test` (8 tests), `cargo build --release`, and `cargo clippy --all-targets` pass with no warnings. Non-test code is 1577 lines (model 414, main 623, detail 540).
 - The app has no creator concept: `creator:` is a tag like any other. There is one Tags tab; searching the list for `creator:` (or `series:`, …) narrows it to that namespace, and tags are shown with their prefix.
 - On 2026-11-11 the app was cut down further: one library folder instead of a list (`Config.folder`, chosen with `win.choose-folder` / Ctrl+O; the settings dialog is gone), no gallery diff updates, and plain `clone()` instead of `glib::clone!` with `rustfmt.toml` (`use_small_heuristics = "Max"`, `max_width = 110`). Old configs with `folders` are ignored, so the folder has to be chosen again once.
 - Crates are **renamed to `gtk` (= gtk4 0.11.5) and `adw` (= libadwaita 0.9.2)**. `image` uses `default-features = false` with only `png, jpeg, webp, gif`. `serde` has `derive`.
@@ -96,6 +96,8 @@ Stop the app with `pkill -x illust-viewer`. Do not use `pkill -f <pattern>`: it 
 - To test on the real display without touching the real settings, launch normally with only `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` set.
 - **Launching other apps from the test instance opens them on the real display.** D-Bus-activatable apps (Loupe, Files, …) are started by `systemd --user`, which has the real session's `DISPLAY` / `WAYLAND_DISPLAY`, even under `dbus-run-session`. Do not click the detail page's menu items, URL rows, or anything else that launches an app during automated tests.
 - `Escape` on a detail page navigates back, so do not use it to close popovers during tests.
+- **Start the test instance with the Bash tool's `run_in_background`** (`cd /tmp/iv && exec dbus-run-session -- /tmp/iv/run.sh`). Instances started with `&` or `setsid` inside an ordinary command are killed when that command ends. `run.sh` also sets `GTK_A11Y=none`. Header buttons move with the window width: at 1000px the main menu is at x≈857, and x≈958 is the window's close button (clicking it ends the app with exit code 0).
+- In the file chooser's location field (Ctrl+L), autocompletion can append `/` to a typed file path; press End, BackSpace before Return.
 - Newlines inside `xdotool type` strings do not become line breaks in a `TextView`. Type each line separately and send `xdotool key Return` between them.
 
 ## GNOME / libadwaita patterns followed
@@ -180,7 +182,7 @@ Signature: `edit(path, now, f)`. Steps:
 
 ### Tests
 
-- No extra crates allowed, so tests create a uniquely named directory under `std::env::temp_dir()`, generate small PNGs with `image`, and run `Library::load` on them. This also covers scanning, deduplication, and thumbnails.
+- No crates beyond the allowed set (gtk4, libadwaita, serde, serde_json, image, rayon, and uuid for import names), so tests create a uniquely named directory under `std::env::temp_dir()`, generate small PNGs with `image`, and run `Library::load` on them. This also covers scanning, deduplication, and thumbnails.
 - The schema `examples` come from `include_str!("../illust-sidecar.schema.json")`.
 
 ## main.rs
@@ -219,6 +221,7 @@ Ctrl+R or choosing a folder while a load is running starts a second load, so **c
 
 - `adw::ActionRow` titles are **parsed as Pango markup by default**. Rows showing tags, URLs, or paths use `use_markup(false)` (otherwise `&` or `<` breaks them).
 - `activate` runs again on a second launch. If a window exists, just `present` it.
+- Adding images: `win.add-images` (a `list-add-symbolic` "Add Images" button at the start of the main page's header, opening a `FileDialog::open_multiple` filtered to the supported extensions) and a `DropTarget` for `gdk::FileList` on the window both call `add_images`, which runs `model::import` for each file in `gio::spawn_blocking`, reloads, and toasts the count (with the first error, if any). `import` copies into the folder root as `<UUIDv7>.<original extension>` (`uuid` crate, `v7` feature, added with the user's approval; names sort by time added and match the user's existing files), refusing to overwrite if the name or its sidecar somehow exists, via a hidden temp file and rename, then writes `{"v":1,"added":now}`. Copies get a new mtime, so they show first. Drag and drop is unverified on Xvfb (xdotool cannot be a drag source); the dialog path was checked.
 - The empty state's button and the menu item both use `win.choose-folder`. Multiple locations are handled by symlinks inside the folder; scanning follows them and skips loops and duplicates.
 - `action(window, name, type, f)` in main.rs registers the plain window actions.
 - Watch for reference cycles. If a closure on widget X's signal holds X or an ancestor strongly, it leaks, and every reload leaves the old root page (with its textures) behind. Hold only children and siblings strongly; downgrade the rest (e.g. `tag_grid`'s `update` holds the stack weakly, since the stack's map handler holds `update`).
