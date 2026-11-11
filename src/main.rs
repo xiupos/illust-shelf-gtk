@@ -1,0 +1,556 @@
+mod detail;
+mod model;
+
+use adw::prelude::*;
+use gtk::{gio, glib};
+use model::{Config, Library};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+const APP_ID: &str = "net.xiupos.IllustViewer";
+const ZOOMS: [u32; 3] = [128, 192, 256];
+const DEFAULT_ZOOM: u32 = 192;
+
+struct Win {
+    nav: adw::NavigationView,
+    toasts: adw::ToastOverlay,
+    /// Replaced on every reload
+    lib: RefCell<Rc<RefCell<Library>>>,
+    config: RefCell<Config>,
+    /// For zoom
+    css: gtk::CssProvider,
+}
+
+fn config_path() -> PathBuf {
+    glib::user_config_dir().join(APP_ID).join("config.json")
+}
+
+fn cache_dir() -> PathBuf {
+    glib::user_cache_dir().join(APP_ID).join("thumbs")
+}
+
+fn main() -> glib::ExitCode {
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    app.connect_activate(activate);
+    app.set_accels_for_action("win.reload", &["<Control>r"]);
+    app.set_accels_for_action("win.choose-folder", &["<Control>o"]);
+    app.set_accels_for_action("app.quit", &["<Control>q"]);
+    app.run()
+}
+
+fn activate(app: &adw::Application) {
+    if let Some(window) = app.active_window() {
+        window.present();
+        return;
+    }
+
+    let nav = adw::NavigationView::new();
+    let toasts = adw::ToastOverlay::new();
+    toasts.set_child(Some(&nav));
+    let window = adw::ApplicationWindow::builder()
+        .application(app)
+        .title("Illust Viewer")
+        .default_width(1100)
+        .default_height(760)
+        .width_request(360)
+        .height_request(300)
+        .content(&toasts)
+        .build();
+
+    let mut config = Config::load(&config_path());
+    if !ZOOMS.contains(&config.zoom) {
+        config.zoom = DEFAULT_ZOOM;
+    }
+    let css = gtk::CssProvider::new();
+    let display = WidgetExt::display(&window);
+    gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    let win = Rc::new(Win {
+        nav,
+        toasts,
+        lib: RefCell::new(Rc::new(RefCell::new(Library::load(None, cache_dir())))),
+        config: RefCell::new(config),
+        css,
+    });
+    apply_css(&win);
+    let w = Rc::downgrade(&win);
+    adw::StyleManager::default().connect_dark_notify(move |_| {
+        if let Some(w) = w.upgrade() {
+            apply_css(&w);
+        }
+    });
+    add_actions(app, &window, &win);
+    window.present();
+    reload(&win);
+}
+
+/// Adds `win.<name>`, calling `f` with its parameter
+fn action(
+    window: &adw::ApplicationWindow,
+    name: &str,
+    ty: Option<&glib::VariantTy>,
+    f: impl Fn(Option<&glib::Variant>) + 'static,
+) {
+    let action = gio::SimpleAction::new(name, ty);
+    action.connect_activate(move |_, param| f(param));
+    window.add_action(&action);
+}
+
+fn add_actions(app: &adw::Application, window: &adw::ApplicationWindow, win: &Rc<Win>) {
+    let string = Some(glib::VariantTy::STRING);
+    let w = win.clone();
+    action(window, "reload", None, move |_| reload(&w));
+    let w = win.clone();
+    action(window, "choose-folder", None, move |_| choose_folder(&w));
+    // (path, tag, query): the tag ("" for all) and query of the gallery it was opened from, so
+    // the detail page can step through the same list. show-sibling replaces the detail page
+    let item = Some(glib::VariantTy::new("(sss)").unwrap());
+    for (name, replace) in [("show-item", false), ("show-sibling", true)] {
+        let w = win.clone();
+        action(window, name, item, move |param| {
+            let Some((path, tag, query)) = param.and_then(|p| p.get::<(String, String, String)>()) else {
+                return;
+            };
+            let lib = w.lib.borrow().clone();
+            let page = detail::page(&lib, Path::new(&path), &tag, &query);
+            if !replace {
+                return w.nav.push(&page);
+            }
+            save_visible(&w);
+            let stack = w.nav.navigation_stack();
+            let mut pages: Vec<adw::NavigationPage> = stack.iter().filter_map(|p| p.ok()).collect::<Vec<_>>();
+            pages.pop();
+            pages.push(page);
+            w.nav.replace(&pages);
+        });
+    }
+    let w = win.clone();
+    action(window, "show-scope", string, move |param| {
+        if let Some(tag) = param.and_then(|p| p.str()) {
+            w.nav.push(&scope_page(&w, tag));
+        }
+    });
+    let w = win.clone();
+    action(window, "toast", string, move |param| {
+        if let Some(text) = param.and_then(|p| p.str()) {
+            w.toasts.add_toast(adw::Toast::new(text));
+        }
+    });
+
+    let zoom = win.config.borrow().zoom.to_variant();
+    let zoom = gio::SimpleAction::new_stateful("zoom", Some(glib::VariantTy::UINT32), &zoom);
+    let w = win.clone();
+    zoom.connect_activate(move |action, param| {
+        if let Some(z) = param.and_then(|p| p.get::<u32>()).filter(|z| ZOOMS.contains(z)) {
+            action.set_state(&z.to_variant());
+            w.config.borrow_mut().zoom = z;
+            apply_css(&w);
+            save_config(&w);
+        }
+    });
+    window.add_action(&zoom);
+
+    // Ctrl+Plus / Ctrl+Minus step from the current size and call win.zoom
+    let shortcuts = gtk::ShortcutController::new();
+    for (trigger, step) in [
+        ("<Control>plus|<Control>equal|<Control>KP_Add", 1),
+        ("<Control>minus|<Control>KP_Subtract", -1),
+        ("<Control>0|<Control>KP_0", 0),
+    ] {
+        let w = win.clone();
+        let action = gtk::CallbackAction::new(move |widget, _| {
+            let current = ZOOMS.iter().position(|&z| z == w.config.borrow().zoom).unwrap_or(1);
+            let next = match step {
+                0 => DEFAULT_ZOOM,
+                _ => ZOOMS[current.saturating_add_signed(step).min(ZOOMS.len() - 1)],
+            };
+            let _ = widget.activate_action("win.zoom", Some(&next.to_variant()));
+            glib::Propagation::Stop
+        });
+        let trigger = gtk::ShortcutTrigger::parse_string(trigger);
+        shortcuts.add_shortcut(gtk::Shortcut::new(trigger, Some(action)));
+    }
+    window.add_controller(shortcuts);
+
+    let about = gio::SimpleAction::new("about", None);
+    let w = win.clone();
+    about.connect_activate(move |_, _| {
+        let dialog = adw::AboutDialog::builder()
+            .application_name("Illust Viewer")
+            .application_icon("image-x-generic")
+            .version(env!("CARGO_PKG_VERSION"))
+            .comments("Browse and organize illustrations with sidecar metadata")
+            .build();
+        dialog.present(Some(&w.nav));
+    });
+    app.add_action(&about);
+
+    // Closing the window (instead of app.quit) runs close-request, which saves the detail page
+    let quit = gio::SimpleAction::new("quit", None);
+    let weak = window.downgrade();
+    quit.connect_activate(move |_, _| weak.upgrade().iter().for_each(|w| w.close()));
+    app.add_action(&quit);
+    let w = win.clone();
+    window.connect_close_request(move |_| {
+        save_visible(&w);
+        glib::Propagation::Proceed
+    });
+}
+
+/// Saves the detail page if one is shown. Pages below it were saved when they were hidden
+fn save_visible(win: &Win) {
+    if let Some(page) = win.nav.visible_page() {
+        let _ = page.activate_action(detail::SAVE, None);
+    }
+}
+
+/// The app's CSS: the gallery at the current zoom, and the detail page's image controls and bottom
+/// pane from GNOME's Image Viewer. Its OSD color depends on libadwaita's dark style, which
+/// `prefers-color-scheme` does not follow when the app or a debug variable overrides it
+fn apply_css(win: &Win) {
+    let n = win.config.borrow().zoom;
+    let osd = if adw::StyleManager::default().is_dark() {
+        "rgba(0, 0, 0, 0.65)"
+    } else {
+        "rgba(240, 240, 240, 0.75)"
+    };
+    win.css.load_from_string(&format!(
+        "gridview.gallery {{ padding: 6px; }}
+         gridview.gallery > child {{ padding: 3px; }}
+         gridview.gallery picture {{ min-width: {n}px; min-height: {n}px; border-radius: 6px; }}
+         .osd-box {{ border-radius: 12px; background-color: {osd}; padding: 6px; margin: 18px; }}
+         .tag-tile .shade {{ border-radius: 6px; background: linear-gradient(to bottom, transparent 40%, rgba(0, 0, 0, 0.65)); }}
+         .tag-tile label {{ color: white; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6); }}
+         .tag-tile .tag {{ font-weight: 800; font-size: 1.1em; }}
+         .tag-tile .count {{ font-size: 0.85em; opacity: 0.85; }}
+         .bottom-details {{ box-shadow: 0 -1px var(--headerbar-darker-shade-color); }}"
+    ));
+}
+
+fn save_config(win: &Win) {
+    if let Err(e) = win.config.borrow().save(&config_path()) {
+        win.toasts.add_toast(adw::Toast::new(&format!("Could not save settings: {e}")));
+    }
+}
+
+fn choose_folder(win: &Rc<Win>) {
+    let dialog = gtk::FileDialog::builder().title("Choose Folder").modal(true).build();
+    let parent = win.nav.root().and_downcast::<gtk::Window>();
+    let win = win.clone();
+    dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |result| {
+        if let Some(path) = result.ok().and_then(|f| f.path()) {
+            win.config.borrow_mut().folder = Some(path);
+            save_config(&win);
+            reload(&win);
+        }
+    });
+}
+
+/// Called on startup, Ctrl+R, and folder changes. Replaces the whole screen
+fn reload(win: &Rc<Win>) {
+    save_visible(win);
+    let loading = loading_page();
+    win.nav.replace(std::slice::from_ref(&loading));
+    let folder = win.config.borrow().folder.clone();
+    let win = win.clone();
+    glib::spawn_future_local(async move {
+        let lib = gio::spawn_blocking(move || Library::load(folder.as_deref(), cache_dir()))
+            .await
+            .unwrap_or_else(|_| Library::load(None, cache_dir()));
+        // If a newer reload has started, let it win
+        if win.nav.visible_page().as_ref() != Some(&loading) {
+            return;
+        }
+        *win.lib.borrow_mut() = Rc::new(RefCell::new(lib));
+        win.nav.replace(&[root_page(&win)]);
+    });
+}
+
+/// The primary menu (HIG): view options, then app items, ending with About
+fn main_menu() -> gio::Menu {
+    let zoom = gio::Menu::new();
+    for (label, z) in [("Small", 128u32), ("Medium", 192), ("Large", 256)] {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(Some("win.zoom"), Some(&z.to_variant()));
+        zoom.append_item(&item);
+    }
+    let folder = gio::Menu::new();
+    folder.append(Some("Choose Folder…"), Some("win.choose-folder"));
+    folder.append(Some("Reload"), Some("win.reload"));
+    let app = gio::Menu::new();
+    app.append(Some("About Illust Viewer"), Some("app.about"));
+    let menu = gio::Menu::new();
+    menu.append_section(Some("Thumbnail Size"), &zoom);
+    menu.append_section(None, &folder);
+    menu.append_section(None, &app);
+    menu
+}
+
+fn menu_button() -> gtk::MenuButton {
+    detail::menu_button(&main_menu())
+}
+
+fn status_page(status: &adw::StatusPage, with_menu: bool) -> adw::NavigationPage {
+    let header = adw::HeaderBar::new();
+    if with_menu {
+        header.pack_end(&menu_button());
+    }
+    let view = adw::ToolbarView::builder().content(status).build();
+    view.add_top_bar(&header);
+    adw::NavigationPage::new(&view, "Illust Viewer")
+}
+
+fn loading_page() -> adw::NavigationPage {
+    let status = adw::StatusPage::builder().title("Creating Thumbnails…").build();
+    status.set_paintable(Some(&adw::SpinnerPaintable::new(Some(&status))));
+    status_page(&status, false)
+}
+
+fn empty_page(win: &Rc<Win>) -> adw::NavigationPage {
+    let chosen = win.config.borrow().folder.is_some();
+    let button = gtk::Button::builder()
+        .label("Choose Folder")
+        .halign(gtk::Align::Center)
+        .css_classes(["pill", "suggested-action"])
+        .action_name("win.choose-folder")
+        .build();
+    let status = adw::StatusPage::builder()
+        .icon_name("folder-pictures-symbolic")
+        .title(if chosen { "No Illustrations" } else { "No Folder" })
+        .description("Choose a folder that contains illustrations. Subfolders and symlinks are included.")
+        .child(&button)
+        .build();
+    status_page(&status, true)
+}
+
+fn root_page(win: &Rc<Win>) -> adw::NavigationPage {
+    let lib = win.lib.borrow().clone();
+    if lib.borrow().is_empty() {
+        return empty_page(win);
+    }
+    let entry = gtk::SearchEntry::builder().placeholder_text("Search").build();
+    let stack = adw::ViewStack::new();
+    let gallery = gallery(&lib, None, &entry);
+    stack.add_titled_with_icon(&gallery, Some("gallery"), "Illustrations", "image-x-generic-symbolic");
+    let tags = tag_grid(&lib, &entry);
+    stack.add_titled_with_icon(&tags, Some("tags"), "Tags", "user-bookmarks-symbolic");
+
+    let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
+    let header = adw::HeaderBar::new();
+    header.set_title_widget(Some(&switcher));
+    header.pack_end(&menu_button());
+    let page = searchable_page("Illust Viewer", &header, &entry, &stack);
+
+    // On narrow windows the switcher moves from the header to a bottom bar (libadwaita ViewSwitcher)
+    let bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
+    let bin = page.child().and_downcast::<adw::BreakpointBin>().unwrap();
+    bin.child().and_downcast::<adw::ToolbarView>().unwrap().add_bottom_bar(&bar);
+    let narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 550sp").unwrap());
+    narrow.add_setter(&bar, "reveal", Some(&true.to_value()));
+    narrow.add_setter(&switcher, "visible", Some(&false.to_value()));
+    bin.add_breakpoint(narrow);
+    page
+}
+
+/// Gallery of one tag. Has its own header and search bar
+fn scope_page(win: &Rc<Win>, tag: &str) -> adw::NavigationPage {
+    let lib = win.lib.borrow().clone();
+    let entry = gtk::SearchEntry::builder().placeholder_text("Search").build();
+    let gallery = gallery(&lib, Some(tag.to_owned()), &entry);
+    searchable_page(tag, &adw::HeaderBar::new(), &entry, &gallery)
+}
+
+/// Page with a header, a search bar below it (HIG: toggled by a header button or Ctrl+F, and
+/// typing starts a search while the page is shown), and the content, in a BreakpointBin
+fn searchable_page(
+    title: &str,
+    header: &adw::HeaderBar,
+    entry: &gtk::SearchEntry,
+    content: &impl IsA<gtk::Widget>,
+) -> adw::NavigationPage {
+    let clamp = adw::Clamp::builder().maximum_size(400).child(entry).build();
+    let bar = gtk::SearchBar::builder().child(&clamp).build();
+    bar.connect_entry(entry);
+    let toggle =
+        gtk::ToggleButton::builder().icon_name("system-search-symbolic").tooltip_text("Search").build();
+    toggle.bind_property("active", &bar, "search-mode-enabled").bidirectional().build();
+    header.pack_end(&toggle);
+    bar.connect_map(|bar| bar.set_key_capture_widget(bar.root().as_ref()));
+    bar.connect_unmap(|bar| bar.set_key_capture_widget(gtk::Widget::NONE));
+
+    let view = adw::ToolbarView::builder().content(content).build();
+    view.add_top_bar(header);
+    view.add_top_bar(&bar);
+    let ctrl_f = gtk::CallbackAction::new(move |_, _| {
+        bar.set_search_mode(!bar.is_search_mode());
+        glib::Propagation::Stop
+    });
+    let shortcuts = gtk::ShortcutController::new();
+    shortcuts
+        .add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("<Control>f"), Some(ctrl_f)));
+    view.add_controller(shortcuts);
+    let bin = adw::BreakpointBin::builder().width_request(360).height_request(300).child(&view).build();
+    adw::NavigationPage::new(&bin, title)
+}
+
+/// Built once with the library at hand; a search rebuilds the whole list
+fn gallery(lib: &Rc<RefCell<Library>>, tag: Option<String>, entry: &gtk::SearchEntry) -> gtk::Stack {
+    let list = gtk::StringList::new(&lib.borrow().paths(tag.as_deref(), ""));
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, obj| {
+        let picture = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Cover)
+            .can_shrink(true)
+            .overflow(gtk::Overflow::Hidden)
+            .build();
+        obj.downcast_ref::<gtk::ListItem>().unwrap().set_child(Some(&picture));
+    });
+    let l = lib.clone();
+    factory.connect_bind(move |_, obj| {
+        let item = obj.downcast_ref::<gtk::ListItem>().unwrap();
+        let path = item.item().and_downcast::<gtk::StringObject>().unwrap().string();
+        let picture = item.child().and_downcast::<gtk::Picture>().unwrap();
+        picture.set_filename(Some(l.borrow().thumb(Path::new(path.as_str()))));
+    });
+    let grid = tile_grid(&list, &factory);
+    // Weak: the entry's handler holds the stack that contains the grid
+    let (l, t, e) = (list.clone(), tag.clone().unwrap_or_default(), entry.downgrade());
+    grid.connect_activate(move |grid, pos| {
+        if let (Some(path), Some(entry)) = (l.string(pos), e.upgrade()) {
+            let target = (path.as_str(), t.as_str(), entry.text().as_str()).to_variant();
+            let _ = grid.activate_action("win.show-item", Some(&target));
+        }
+    });
+    let stack = no_results(&scrolled(&grid));
+    let (lib, st) = (lib.clone(), stack.clone());
+    entry.connect_search_changed(move |entry| {
+        let lib = lib.borrow();
+        list.splice(0, list.n_items(), &lib.paths(tag.as_deref(), &entry.text()));
+        show_results(&st, list.n_items() > 0);
+    });
+    stack
+}
+
+/// A grid of square thumbnail tiles at the current zoom
+fn tile_grid(list: &gtk::StringList, factory: &gtk::SignalListItemFactory) -> gtk::GridView {
+    gtk::GridView::builder()
+        .model(&gtk::NoSelection::new(Some(list.clone())))
+        .factory(factory)
+        .single_click_activate(true)
+        .max_columns(64)
+        // Columns come from the minimum width (the zoom), then stretch to fill the row. A natural
+        // vertical policy makes each row as tall as a square thumbnail at that width, so tiles
+        // stay square without gaps
+        .vscroll_policy(gtk::ScrollablePolicy::Natural)
+        .css_classes(["gallery"])
+        .build()
+}
+
+fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(child).build()
+}
+
+/// The tags as tiles showing each tag's cover image, like pixiv's tag search. Searching filters
+/// them by name, so `creator:` shows the creators. Rebuilt every time it is shown
+fn tag_grid(lib: &Rc<RefCell<Library>>, entry: &gtk::SearchEntry) -> gtk::Stack {
+    // Tag → (count, cover), and the tags in order, from the last time the grid was shown
+    type Facets = (HashMap<String, (usize, PathBuf)>, Vec<String>);
+    let facets: Rc<RefCell<Facets>> = Rc::default();
+    let list = gtk::StringList::new(&[]);
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, obj| {
+        let picture = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Cover)
+            .can_shrink(true)
+            .overflow(gtk::Overflow::Hidden)
+            .build();
+        let label = |class: &str| {
+            gtk::Label::builder()
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .lines(2)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .justify(gtk::Justification::Center)
+                .css_classes([class])
+                .build()
+        };
+        let text = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .valign(gtk::Align::End)
+            .margin_start(8)
+            .margin_end(8)
+            .margin_bottom(10)
+            .build();
+        text.append(&label("tag"));
+        text.append(&label("count"));
+        let tile = gtk::Overlay::builder().child(&picture).css_classes(["tag-tile"]).build();
+        tile.add_overlay(&gtk::Box::builder().css_classes(["shade"]).build());
+        tile.add_overlay(&text);
+        obj.downcast_ref::<gtk::ListItem>().unwrap().set_child(Some(&tile));
+    });
+    let (l, f) = (lib.clone(), facets.clone());
+    factory.connect_bind(move |_, obj| {
+        let item = obj.downcast_ref::<gtk::ListItem>().unwrap();
+        let tag = item.item().and_downcast::<gtk::StringObject>().unwrap().string();
+        let tile = item.child().and_downcast::<gtk::Overlay>().unwrap();
+        let Some((count, cover)) = f.borrow().0.get(tag.as_str()).cloned() else { return };
+        tile.child().and_downcast::<gtk::Picture>().unwrap().set_filename(Some(l.borrow().thumb(&cover)));
+        let text = tile.last_child().unwrap();
+        let tag_label = text.first_child().and_downcast::<gtk::Label>().unwrap();
+        tag_label.set_label(&format!("#{tag}"));
+        tag_label.next_sibling().and_downcast::<gtk::Label>().unwrap().set_label(&count.to_string());
+        tile.set_tooltip_text(Some(&tag));
+    });
+    let grid = tile_grid(&list, &factory);
+    let l = list.clone();
+    grid.connect_activate(move |grid, pos| {
+        if let Some(tag) = l.string(pos) {
+            let _ = grid.activate_action("win.show-scope", Some(&tag.to_variant()));
+        }
+    });
+    let stack = no_results(&scrolled(&grid));
+
+    // Weak: the stack's map handler holds `update`
+    let (f, st) = (facets.clone(), stack.downgrade());
+    let update = Rc::new(move |entry: &gtk::SearchEntry| {
+        let query = entry.text().trim().to_lowercase();
+        let facets = f.borrow();
+        let tags: Vec<&str> =
+            facets.1.iter().map(String::as_str).filter(|t| t.to_lowercase().contains(&query)).collect();
+        list.splice(0, list.n_items(), &tags);
+        if let Some(st) = st.upgrade() {
+            show_results(&st, !tags.is_empty());
+        }
+    });
+    let u = update.clone();
+    entry.connect_search_changed(move |entry| u(entry));
+    let (lib, weak) = (lib.clone(), entry.downgrade());
+    stack.connect_map(move |_| {
+        let mut f = facets.borrow_mut();
+        f.0.clear();
+        f.1.clear();
+        for (tag, count, cover) in lib.borrow().facets() {
+            f.1.push(tag.clone());
+            f.0.insert(tag, (count, cover));
+        }
+        drop(f);
+        if let Some(entry) = weak.upgrade() {
+            update(&entry);
+        }
+    });
+    stack
+}
+
+/// Shows `content`, or a "No Results" page while a search finds nothing (HIG)
+fn no_results(content: &impl IsA<gtk::Widget>) -> gtk::Stack {
+    let stack = gtk::Stack::new();
+    stack.add_named(content, Some("content"));
+    let status = adw::StatusPage::builder().icon_name("edit-find-symbolic").title("No Results").build();
+    stack.add_named(&status, Some("empty"));
+    stack
+}
+
+fn show_results(stack: &gtk::Stack, any: bool) {
+    stack.set_visible_child_name(if any { "content" } else { "empty" });
+}
