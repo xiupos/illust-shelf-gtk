@@ -1,7 +1,7 @@
 //! The lists of the top page: a gallery of thumbnails (also used for one tag's images), and the
 //! Tags tab, with a row of tags per namespace or a grid of the tags that match a search.
 
-use crate::library::Tag;
+use crate::library::{self, Tag};
 use crate::ui::{self, Lib};
 use gtk::prelude::*;
 use relm4::prelude::*;
@@ -14,6 +14,11 @@ pub struct Gallery {
     query: String,
     /// The images shown, in order
     paths: Vec<PathBuf>,
+}
+
+pub struct GalleryWidgets {
+    /// The grid, or "No Results"
+    stack: gtk::Stack,
     grid: TypedGridView<Thumb, gtk::NoSelection>,
 }
 
@@ -47,12 +52,13 @@ impl RelmGridItem for Thumb {
     }
 }
 
-impl SimpleComponent for Gallery {
+impl Component for Gallery {
     type Init = Lib;
     type Input = GalleryMsg;
     type Output = Open;
+    type CommandOutput = ();
     type Root = gtk::Stack;
-    type Widgets = gtk::Stack;
+    type Widgets = GalleryWidgets;
 
     fn init_root() -> gtk::Stack {
         gtk::Stack::new()
@@ -63,11 +69,17 @@ impl SimpleComponent for Gallery {
         ui::tile_grid(&grid.view);
         grid.view.connect_activate(move |_, position| sender.input(GalleryMsg::Activated(position)));
         ui::add_results(&root, &ui::scrolled(&grid.view));
-        let model = Gallery { lib, tag: None, query: String::new(), paths: Vec::new(), grid };
-        ComponentParts { model, widgets: root }
+        let model = Gallery { lib, tag: None, query: String::new(), paths: Vec::new() };
+        ComponentParts { model, widgets: GalleryWidgets { stack: root, grid } }
     }
 
-    fn update(&mut self, msg: GalleryMsg, sender: ComponentSender<Self>) {
+    fn update_with_view(
+        &mut self,
+        w: &mut GalleryWidgets,
+        msg: GalleryMsg,
+        sender: ComponentSender<Self>,
+        _: &gtk::Stack,
+    ) {
         match msg {
             GalleryMsg::Show(tag) => (self.tag, self.query) = (tag, String::new()),
             GalleryMsg::Search(query) => self.query = query,
@@ -78,12 +90,9 @@ impl SimpleComponent for Gallery {
         }
         let lib = self.lib.borrow();
         self.paths = lib.paths(self.tag.as_deref(), &self.query);
-        self.grid.clear();
-        self.grid.extend_from_iter(self.paths.iter().map(|path| Thumb(lib.thumb(path))));
-    }
-
-    fn update_view(&self, stack: &mut gtk::Stack, _: ComponentSender<Self>) {
-        ui::show_results(stack, !self.paths.is_empty());
+        w.grid.clear();
+        w.grid.extend_from_iter(self.paths.iter().map(|path| Thumb(lib.thumb(path))));
+        ui::show_results(&w.stack, !self.paths.is_empty());
     }
 }
 
@@ -93,16 +102,19 @@ pub struct Tags {
     lib: Lib,
     tags: Vec<Tag>,
     query: String,
-    /// A row of tags per namespace
-    sections: Vec<Grid>,
+    /// The tags of each namespace
+    sections: Vec<(String, Vec<Tag>)>,
     /// The tags that match the search
-    found: Grid,
+    found: Vec<Tag>,
 }
 
 pub struct TagsWidgets {
     /// The sections, or the search
     stack: gtk::Stack,
     sections: gtk::Box,
+    /// A row of tiles per section
+    rows: Vec<Grid>,
+    found: Grid,
     /// `found`, or "No Results"
     results: gtk::Stack,
 }
@@ -141,8 +153,7 @@ struct TileWidgets {
 
 impl Tile {
     fn new(lib: &Lib, tag: &Tag, short: bool) -> Self {
-        let label =
-            if short { tag.name.split_once(':').map_or(&*tag.name, |(_, name)| name) } else { &tag.name };
+        let label = if short { tag.short() } else { &tag.name };
         Tile {
             name: tag.name.clone(),
             label: format!("#{label}"),
@@ -257,8 +268,9 @@ impl Component for Tags {
         let results = gtk::Stack::new();
         ui::add_results(&results, &ui::scrolled(&found.view));
         stack.add_named(&results, Some("search"));
-        let model = Tags { lib, tags: Vec::new(), query: String::new(), sections: Vec::new(), found };
-        ComponentParts { model, widgets: TagsWidgets { stack, sections, results } }
+        let model =
+            Tags { lib, tags: Vec::new(), query: String::new(), sections: Vec::new(), found: Vec::new() };
+        ComponentParts { model, widgets: TagsWidgets { stack, sections, rows: Vec::new(), found, results } }
     }
 
     fn update_with_view(
@@ -271,38 +283,30 @@ impl Component for Tags {
         match msg {
             TagsMsg::Refresh => {
                 self.tags = self.lib.borrow().tags();
-                // Namespaces in the order of their most used tag, tags without one last
-                let mut spaces: Vec<&str> = Vec::new();
-                for tag in &self.tags {
-                    if !spaces.contains(&tag.namespace()) {
-                        spaces.push(tag.namespace());
-                    }
-                }
-                spaces.sort_by_key(|space| space.is_empty());
+                self.sections = library::sections(&self.tags);
                 while let Some(child) = w.sections.first_child() {
                     w.sections.remove(&child);
                 }
-                self.sections.clear();
-                for (i, space) in spaces.into_iter().enumerate() {
+                w.rows.clear();
+                for (i, (space, tags)) in self.sections.iter().enumerate() {
                     let mut grid = grid(Some(i), &sender);
-                    let tags = self.tags.iter().filter(|tag| tag.namespace() == space);
-                    grid.extend_from_iter(tags.map(|tag| Tile::new(&self.lib, tag, true)));
+                    grid.extend_from_iter(tags.iter().map(|tag| Tile::new(&self.lib, tag, true)));
                     w.sections.append(&section(space, &grid, &sender));
-                    self.sections.push(grid);
+                    w.rows.push(grid);
                 }
             }
-            TagsMsg::Search(query) => self.query = query.trim().to_lowercase(),
+            TagsMsg::Search(query) => self.query = query.trim().to_owned(),
             TagsMsg::Activated(section, position) => {
-                let grid = section.map_or(Some(&self.found), |i| self.sections.get(i));
-                if let Some(tile) = grid.and_then(|grid| grid.get(position)) {
-                    sender.output(TagsOutput::Show(tile.borrow().name.clone())).unwrap();
+                let tags = section.map_or(Some(&self.found), |i| self.sections.get(i).map(|(_, tags)| tags));
+                if let Some(tag) = tags.and_then(|tags| tags.get(position as usize)) {
+                    sender.output(TagsOutput::Show(tag.name.clone())).unwrap();
                 }
                 return;
             }
         }
-        let found = self.tags.iter().filter(|tag| tag.name.to_lowercase().contains(&self.query));
-        self.found.clear();
-        self.found.extend_from_iter(found.map(|tag| Tile::new(&self.lib, tag, false)));
+        self.found = library::search_tags(&self.tags, &self.query);
+        w.found.clear();
+        w.found.extend_from_iter(self.found.iter().map(|tag| Tile::new(&self.lib, tag, false)));
         w.stack.set_visible_child_name(if self.query.is_empty() { "sections" } else { "search" });
         ui::show_results(&w.results, !self.found.is_empty());
     }

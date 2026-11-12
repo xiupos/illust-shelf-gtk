@@ -110,8 +110,10 @@ fn config_path() -> PathBuf {
     glib::user_config_dir().join(APP_ID).join("config.json")
 }
 
-fn cache_dir() -> PathBuf {
-    glib::user_cache_dir().join(APP_ID).join("thumbs")
+/// Each folder has its own cache: thumbnails are named by the images' paths in the folder
+fn cache_dir(folder: &Path) -> PathBuf {
+    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, folder.as_os_str().as_encoded_bytes());
+    glib::user_cache_dir().join(APP_ID).join("thumbs").join(id.to_string())
 }
 
 /// View options, then the folder, then About
@@ -381,7 +383,7 @@ impl Component for App {
                 w.nav.replace(std::slice::from_ref(&w.loading));
                 let (generation, folder) = (self.generation, self.config.folder.clone());
                 sender.spawn_oneshot_command(move || {
-                    let lib = folder.map(|f| Library::load(&f, cache_dir())).unwrap_or_default();
+                    let lib = folder.map(|f| Library::load(&f, cache_dir(&f))).unwrap_or_default();
                     Cmd::Loaded(generation, lib)
                 });
             }

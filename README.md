@@ -61,7 +61,7 @@ This builds the app and installs it with its icon and its entry in the app list.
 ## Data
 
 - Settings: `~/.config/net.xiupos.IllustShelf.Gtk/config.json` (the folder and thumbnail size)
-- Thumbnails: `~/.cache/net.xiupos.IllustShelf.Gtk/thumbs/` (safe to delete; recreated on the next launch). Thumbnails made by earlier versions are not reused; delete the folder once to reclaim the space
+- Thumbnails: `~/.cache/net.xiupos.IllustShelf.Gtk/thumbs/`, in a folder per library (safe to delete; recreated on the next launch). Thumbnails made by earlier versions are not reused; delete the folder once to reclaim the space
 
 ## Usage
 
@@ -92,6 +92,10 @@ The sidecar is read when an image is opened and rewritten on every change, so do
 | F9 | Show or hide the details pane (detail page) |
 | F11 | Fullscreen (Escape leaves it) |
 | Ctrl+Q | Quit |
+
+## Other platforms
+
+[spec/SPEC.md](spec/SPEC.md) describes the behaviour that an Illust Shelf app for another platform shares with this one, and [spec/cases.json](spec/cases.json) has test cases for it.
 
 ## License
 

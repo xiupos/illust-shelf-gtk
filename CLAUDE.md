@@ -12,18 +12,21 @@ The UI is built with [Relm4](https://relm4.org) components, which talk through m
 | `src/browse.rs` | `Gallery`, a grid of thumbnails, and `Tags`, the Tags tab |
 | `src/detail.rs` | `Detail`: one image and the pane that edits its sidecar |
 | `src/ui.rs`, `src/style.css` | Shared widgets, and the CSS |
-| `src/library.rs` | The images of a folder and their sidecars: scanning, thumbnails, filtering, saving, importing. No GTK. Has the tests |
+| `src/library.rs` | The images of a folder and their sidecars: scanning, thumbnails, filtering, saving, importing, and the rules for tags (sections, search, suggestions). No GTK. Has the tests |
+| `spec/` | `SPEC.md`: the behaviour shared with the apps for other platforms. `cases.json`: test cases for it, in no particular language, which `cargo test` runs |
 | `data/`, `meson.build` | The icons, the desktop entry, and the AppStream metadata. Meson installs them, and has cargo build the app |
 
 Crates are renamed: `gtk` is gtk4 and `adw` is libadwaita, at the versions relm4 uses. Check with `cargo test`, `cargo clippy --all-targets`, and `cargo fmt`.
 
 ## Library
 
+- **Shared behaviour** belongs in `library.rs`, with a test, and in `spec/SPEC.md`; a rule that has cases there gets one in `spec/cases.json`. The components only show state and pass on what the user does. This app is the model for the apps on other platforms, which have nothing else to go by.
+- **IDs.** An image's ID is its path relative to the folder. `Library::file` and `Library::sidecar` give the files. Other platforms have no stable absolute paths (iOS) or none at all (Android).
 - **Sidecars** are read into `Meta`; keys it does not know are kept in `extra`. A sidecar that is missing is editable. One that does not parse as a `Meta`, or whose `v` is not the integer 1, is read-only and never written.
 - **Saving** writes the whole `Meta`, through a temporary file and a rename, and only if it differs from what was read. Changes made elsewhere since the image was opened are overwritten.
 - **Sidecar path.** `.json` is appended to the whole file name. `with_extension` would give `foo.png` and `foo.jpg` the same sidecar.
 - **Scanning** (`walkdir`) follows symlinks and stops at loops; files are deduplicated by canonical path.
-- **Thumbnails** are 512 px center-cropped JPEGs, named by a UUIDv5 of the image's path and remade when older than the image. Images that fail to decode are left out of the library. EXIF orientation is ignored.
+- **Thumbnails** are 512 px center-cropped JPEGs, named by a UUIDv5 of the image's ID and remade when older than the image. Each folder therefore has its own cache folder, which `main.rs` names by a UUIDv5 of the folder's path. Images that fail to decode are left out of the library. EXIF orientation is ignored.
 - **Order.** Newest mtime first, except a `set:` tag's gallery, which is in file name order.
 - `added` is set only when the app creates the sidecar. The time comes from the caller, which keeps the library free of glib.
 - Timing: a thumbnail of a 2400×1600 JPEG takes about 18 ms per image on 8 cores; a cached load of 3000 images takes about 10 ms.

@@ -1,0 +1,121 @@
+{
+  "now": "2026-11-11T09:00:00+09:00",
+  "sidecars": [
+    {
+      "name": "Nothing to save: no sidecar is created",
+      "sidecar": null,
+      "set": { "title": "  ", "tags": ["", " "] },
+      "unchanged": true
+    },
+    {
+      "name": "A new sidecar gets `added`",
+      "sidecar": null,
+      "set": { "title": "x" },
+      "expect": { "v": 1, "title": "x", "added": "2026-11-11T09:00:00+09:00" }
+    },
+    {
+      "name": "Texts are trimmed; empty and repeated tags and URLs are dropped; empty fields are left out; unknown keys are kept; an existing sidecar gets no `added`",
+      "sidecar": "{\"zzz\": 1, \"v\": 1, \"creators\": [{\"name\": \"A\"}], \"title\": \"a\", \"note\": \"n\"}",
+      "set": {
+        "title": "  New  ",
+        "note": " \n",
+        "tags": ["  b ", "", "a", "b", "\t", "a  ", "c"],
+        "urls": ["https://x/1", " https://x/1 ", "https://x/2"]
+      },
+      "expect": {
+        "v": 1,
+        "title": "New",
+        "tags": ["b", "a", "c"],
+        "urls": ["https://x/1", "https://x/2"],
+        "zzz": 1,
+        "creators": [{ "name": "A" }]
+      }
+    },
+    {
+      "name": "An existing `added` is kept",
+      "sidecar": "{\"v\":1,\"tags\":[\"a\"],\"added\":\"2020-01-01T00:00:00Z\"}",
+      "set": { "note": "n" },
+      "expect": { "v": 1, "tags": ["a"], "note": "n", "added": "2020-01-01T00:00:00Z" }
+    },
+    {
+      "name": "No change: the file is not rewritten, whatever its formatting",
+      "sidecar": "{\"v\":1,\"tags\":[\"a\"]}",
+      "set": { "tags": ["a", " a"] },
+      "unchanged": true
+    },
+    {
+      "name": "Not JSON: read-only",
+      "sidecar": "{broken",
+      "editable": false
+    },
+    {
+      "name": "A newer version: read-only",
+      "sidecar": "{\"v\":2,\"title\":\"future\"}",
+      "editable": false
+    },
+    {
+      "name": "`v` is not an integer: read-only",
+      "sidecar": "{\"v\":1.0}",
+      "editable": false
+    },
+    {
+      "name": "A field of the wrong type: read-only",
+      "sidecar": "{\"v\":1,\"tags\":\"a\"}",
+      "editable": false
+    }
+  ],
+  "library": {
+    "files": [
+      {
+        "path": "a.png",
+        "mtime": 300,
+        "sidecar": { "v": 1, "title": "Sunset", "tags": ["x", "y", "creator:Alice", "set:S"] }
+      },
+      {
+        "path": "b.PNG",
+        "mtime": 400,
+        "sidecar": { "v": 1, "note": "memo", "tags": ["x", "x", "creator:Alice", "set:S"] }
+      },
+      { "path": "sub/c.png", "mtime": 500, "sidecar": { "v": 1, "tags": ["creator:Bob", "set:S"] } },
+      { "path": "d.png", "mtime": 200 }
+    ],
+    "skipped": [".hidden.png", ".dir/e.png", "f.sync-conflict-20260101-000000-ABC.png", "readme.txt"],
+    "galleries": [
+      { "tag": null, "query": "", "expect": ["sub/c.png", "b.PNG", "a.png", "d.png"] },
+      { "tag": null, "query": "SUN", "expect": ["a.png"] },
+      { "tag": null, "query": " memo ", "expect": ["b.PNG"] },
+      { "tag": null, "query": "bob", "expect": ["sub/c.png"] },
+      { "tag": null, "query": "nothing", "expect": [] },
+      { "tag": "x", "query": "", "expect": ["b.PNG", "a.png"] },
+      { "tag": "x", "query": "memo", "expect": ["b.PNG"] },
+      { "tag": "set:S", "query": "", "expect": ["a.png", "b.PNG", "sub/c.png"] }
+    ],
+    "tags": [
+      { "name": "set:S", "count": 3, "cover": "a.png" },
+      { "name": "creator:Alice", "count": 2, "cover": "b.PNG" },
+      { "name": "x", "count": 2, "cover": "b.PNG" },
+      { "name": "creator:Bob", "count": 1, "cover": "sub/c.png" },
+      { "name": "y", "count": 1, "cover": "a.png" }
+    ],
+    "sections": [
+      { "namespace": "set", "tags": ["set:S"] },
+      { "namespace": "creator", "tags": ["creator:Alice", "creator:Bob"] },
+      { "namespace": "", "tags": ["x", "y"] }
+    ],
+    "tag_searches": [
+      { "query": " ALI ", "expect": ["creator:Alice"] },
+      { "query": ":", "expect": ["set:S", "creator:Alice", "creator:Bob"] },
+      { "query": "z", "expect": [] }
+    ]
+  },
+  "suggestions": {
+    "known": ["creator:Alice", "cat", "Cb", "cc", "cd", "ce", "cf", "dog"],
+    "cases": [
+      { "text": " C", "attached": ["cat"], "expect": ["creator:Alice", "Cb", "cc", "cd", "ce"] },
+      { "text": "og", "attached": [], "expect": [] },
+      { "text": "  ", "attached": [], "expect": [] },
+      { "text": "DOG", "attached": [], "expect": ["dog"] },
+      { "text": "dog", "attached": ["dog"], "expect": [] }
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 //! One image, and the pane that edits its sidecar. Every edit is saved at once.
 
-use crate::library::Meta;
+use crate::library::{self, Meta};
 use crate::ui::{self, Lib};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -9,12 +9,9 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-/// The number of tags suggested while typing one
-const SUGGESTIONS: usize = 5;
-
 pub struct Detail {
     lib: Lib,
-    /// The gallery the page was opened from, which previous / next step through
+    /// The gallery the page was opened from, as IDs, which previous / next step through
     paths: Vec<PathBuf>,
     index: usize,
     meta: Meta,
@@ -119,6 +116,7 @@ impl Detail {
         let path = self.path().to_owned();
         let mut lib = self.lib.borrow_mut();
         lib.refresh(&path);
+        let file = lib.file(&path);
         let item = lib.get(&path);
         self.meta = item.map(|item| item.meta.clone()).unwrap_or_default();
         self.editable = item.is_some_and(|item| item.editable);
@@ -128,9 +126,9 @@ impl Detail {
         let name = |p: Option<&Path>| {
             p.and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned()
         };
-        page.set_title(&name(Some(&path)));
-        w.folder.set_subtitle(&name(path.parent()));
-        w.path.set_subtitle(&path.to_string_lossy());
+        page.set_title(&name(Some(&file)));
+        w.folder.set_subtitle(&name(file.parent()));
+        w.path.set_subtitle(&file.to_string_lossy());
         w.banner.set_revealed(!self.editable);
         w.steps[0].set_sensitive(self.index > 0);
         w.steps[1].set_sensitive(self.index + 1 < self.paths.len());
@@ -148,7 +146,7 @@ impl Detail {
         fill(&w.suggestions, &[], |_, tag| suggestion_row(tag, sender));
         // By content, like the thumbnail. GTK itself needs a loader for some formats
         sender.spawn_oneshot_command(move || {
-            let image = image::ImageReader::open(&path).and_then(|r| r.with_guessed_format());
+            let image = image::ImageReader::open(&file).and_then(|r| r.with_guessed_format());
             Decoded(path, image.ok().and_then(|r| r.decode().ok()).map(|i| i.into_rgba8()))
         });
     }
@@ -418,10 +416,8 @@ impl Component for Detail {
                 self.save(&sender);
             }
             Msg::Add(field, value) => {
-                let value = value.trim().to_owned();
                 w.list(field).entry.set_text("");
-                if !value.is_empty() && !self.values(field).contains(&value) {
-                    self.values(field).push(value);
+                if library::push_unique(self.values(field), &value) {
                     self.changed(w, field, &sender);
                 }
             }
@@ -442,30 +438,25 @@ impl Component for Detail {
                     }
                 }
             }
-            // The most used tags that start with the text and are not on the image yet
             Msg::Typed(text) => {
-                let text = text.trim().to_lowercase();
-                let fits = |tag: &&String| {
-                    !text.is_empty() && tag.to_lowercase().starts_with(&text) && !self.meta.tags.contains(tag)
-                };
-                let found: Vec<String> = self.known.iter().filter(fits).take(SUGGESTIONS).cloned().collect();
+                let found = library::suggest(&self.known, &self.meta.tags, &text);
                 fill(&w.suggestions, &found, |_, tag| suggestion_row(tag, &sender));
             }
             Msg::Launch(target) => {
                 let path = self.path().to_owned();
+                let mut lib = self.lib.borrow_mut();
+                let file = lib.file(&path);
                 let launch = |file: &Path| gtk::FileLauncher::new(Some(&gio::File::for_path(file)));
                 match target {
-                    Target::Image => launch(&path).launch(window.as_ref(), gio::Cancellable::NONE, opened),
+                    Target::Image => launch(&file).launch(window.as_ref(), gio::Cancellable::NONE, opened),
                     Target::Folder => {
-                        launch(&path).open_containing_folder(window.as_ref(), gio::Cancellable::NONE, opened)
+                        launch(&file).open_containing_folder(window.as_ref(), gio::Cancellable::NONE, opened)
                     }
                     Target::Sidecar => {
-                        let mut lib = self.lib.borrow_mut();
                         if let Err(e) = lib.create(&path, &ui::now()) {
                             toast(format!("Could not create the sidecar: {e}"));
                         }
-                        let sidecar = lib.get(&path).map(|item| item.sidecar()).unwrap_or_default();
-                        launch(&sidecar).launch(window.as_ref(), gio::Cancellable::NONE, opened);
+                        launch(&lib.sidecar(&path)).launch(window.as_ref(), gio::Cancellable::NONE, opened);
                     }
                 }
             }
@@ -482,15 +473,21 @@ impl Component for Detail {
                 dialog.connect_response(Some("trash"), move |_, _| sender.input(Msg::Trashed));
                 dialog.present(Some(page));
             }
-            // To the trash, not deleted, so that it can be undone in Files
+            // The image and its sidecar. To the trash, not deleted, so that it can be undone in
+            // Files
             Msg::Trashed => {
-                let sidecar =
-                    self.lib.borrow().get(self.path()).map(|item| item.sidecar()).unwrap_or_default();
+                let lib = self.lib.borrow();
+                // Not the folder itself, which is the file of the empty ID
+                if lib.get(self.path()).is_none() {
+                    return;
+                }
+                let (file, sidecar) = (lib.file(self.path()), lib.sidecar(self.path()));
+                drop(lib);
                 let trash = |p: &Path| match p.exists() {
                     true => gio::File::for_path(p).trash(gio::Cancellable::NONE),
                     false => Ok(()),
                 };
-                match trash(self.path()).and_then(|_| trash(&sidecar)) {
+                match trash(&file).and_then(|_| trash(&sidecar)) {
                     Ok(()) => toast("Moved to Trash".into()),
                     Err(e) => toast(format!("Could not move to the trash: {}", e.message())),
                 }
