@@ -14,7 +14,7 @@ const THUMB_SIZE: u32 = 512;
 /// Galleries of tags with this prefix are in file name order
 const SET: &str = "set:";
 
-/// A sidecar's content. See `illust-sidecar.schema.json`
+/// A sidecar's content, in the illust-sidecar format: https://github.com/xiupos/illust-sidecar
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
     pub v: u64,
@@ -405,29 +405,27 @@ mod tests {
     }
 
     #[test]
-    fn reads_schema_examples() {
-        let schema: Value = serde_json::from_str(include_str!("../illust-sidecar.schema.json")).unwrap();
-        let examples = schema["examples"].as_array().unwrap();
-        assert_eq!(examples.len(), 3);
-        let dir = tmpdir("examples");
-        for (i, ex) in examples.iter().enumerate() {
-            let p = dir.join(format!("{i}.png"));
-            png(&p);
-            write_sidecar(&p, &ex.to_string());
-        }
+    fn reads_sidecars() {
+        let dir = tmpdir("read");
+        let (empty, full) = (dir.join("empty.png"), dir.join("full.png"));
+        png(&empty);
+        png(&full);
+        write_sidecar(&empty, r#"{"v": 1}"#);
+        let text = r#"{"v": 1, "title": "夕暮れの駅前", "tags": ["風景", "creator:サンプル太郎", "rating:4"],
+            "urls": ["https://example.com/artworks/12345678"], "note": "壁紙候補",
+            "added": "2026-11-03T14:11:00+09:00"}"#;
+        write_sidecar(&full, text);
         let lib = load(&dir);
-        let items: Vec<&Item> = (0..3).map(|i| lib.get(&dir.join(format!("{i}.png"))).unwrap()).collect();
-        assert!(items.iter().all(|it| it.editable));
-        assert_eq!(items[0].meta, Meta::default());
+        assert!(lib.get(&empty).unwrap().editable && lib.get(&full).unwrap().editable);
+        assert_eq!(meta(&lib, &empty), Meta::default());
 
-        let m = &items[1].meta;
+        let m = meta(&lib, &full);
         assert_eq!(m.title, "夕暮れの駅前");
-        assert_eq!(m.tags.len(), 7);
-        assert!(m.tags.contains(&"creator:サンプル太郎".to_owned()));
+        assert_eq!(m.tags, ["風景", "creator:サンプル太郎", "rating:4"]);
         assert_eq!(m.urls, ["https://example.com/artworks/12345678"]);
         assert_eq!(m.note, "壁紙候補");
         assert_eq!(m.added.as_deref(), Some("2026-11-03T14:11:00+09:00"));
-        assert_eq!(items[2].meta.title, "Rainy Window");
+        assert!(m.extra.is_empty());
     }
 
     #[test]

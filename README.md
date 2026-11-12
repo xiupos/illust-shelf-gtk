@@ -2,7 +2,7 @@
 
 A GNOME app for browsing and organizing illustrations in a local folder, with metadata such as tags and sources.
 
-Metadata is stored next to each image in a sidecar JSON file: `foo.png.json` for `foo.png`. See [`illust-sidecar.schema.json`](illust-sidecar.schema.json) for the format. Sidecars that cannot be read or have a `v` other than 1 are read-only and are never overwritten. Unknown keys are kept.
+Metadata is stored next to each image in a sidecar JSON file: `foo.png.json` for `foo.png`. The format is [illust-sidecar](https://github.com/xiupos/illust-sidecar). Sidecars that cannot be read or have a `v` other than 1 are read-only and are never overwritten. Unknown keys are kept.
 
 ## Requirements
 
