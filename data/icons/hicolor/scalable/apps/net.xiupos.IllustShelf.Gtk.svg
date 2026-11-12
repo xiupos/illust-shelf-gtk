@@ -1,33 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
-    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="dusk" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#613583"/>
-      <stop offset="0.6" stop-color="#dc8add"/>
+      <stop offset="0.65" stop-color="#dc8add"/>
       <stop offset="1" stop-color="#ffbe6f"/>
     </linearGradient>
-    <clipPath id="picture">
-      <rect x="16" y="26" width="96" height="74" rx="4"/>
-    </clipPath>
+    <clipPath id="tall"><rect x="20" y="26" width="40" height="66" rx="3"/></clipPath>
+    <clipPath id="wide"><rect x="62" y="52" width="46" height="40" rx="3"/></clipPath>
   </defs>
-  <!-- A second illustration behind -->
-  <rect x="20" y="10" width="88" height="40" rx="8" fill="#c0bfbc"/>
-  <rect x="20" y="10" width="88" height="36" rx="8" fill="#deddda"/>
-  <!-- The card: a darker lip under a light face -->
-  <rect x="8" y="22" width="112" height="94" rx="10" fill="#c0bfbc"/>
-  <rect x="8" y="18" width="112" height="90" rx="10" fill="#f6f5f4"/>
-  <!-- The illustration -->
-  <g clip-path="url(#picture)">
-    <rect x="16" y="26" width="96" height="74" fill="url(#sky)"/>
-    <circle cx="80" cy="60" r="13" fill="#f9f06b"/>
-    <path d="M16 100V74l22-22 26 26 12-10 36 28v4z" fill="#1c71d8"/>
-    <path d="M16 100V86l14-10 30 24z" fill="#1a5fb4"/>
+  <!-- A tall illustration at the back -->
+  <rect x="14" y="20" width="52" height="80" rx="7" fill="#f6f5f4"/>
+  <g clip-path="url(#tall)">
+    <rect x="20" y="26" width="40" height="66" fill="url(#dusk)"/>
+    <circle cx="45" cy="54" r="8" fill="#f9f06b"/>
+    <path d="M20 92V70l12-12 14 14 6-5 8 7v18z" fill="#1c71d8"/>
+    <path d="M20 92V80l8-6 18 18z" fill="#1a5fb4"/>
   </g>
-  <!-- The tag -->
-  <g stroke-linejoin="round" stroke-width="6">
-    <path d="M80 104l12-12h27v24H92z" fill="#e5a50a" stroke="#e5a50a"/>
-    <path d="M80 100l12-12h27v24H92z" fill="#f6d32d" stroke="#f6d32d"/>
+  <!-- A wide one beside it -->
+  <rect x="56" y="46" width="58" height="54" rx="7" fill="#deddda"/>
+  <g clip-path="url(#wide)">
+    <rect x="62" y="52" width="46" height="40" fill="#99c1f1"/>
+    <circle cx="74" cy="64" r="5" fill="#ffffff"/>
+    <path d="M62 92V80q12-10 24-2t22-6v20z" fill="#33d17a"/>
+    <path d="M62 92v-4q14-6 26 0t20-2v6z" fill="#26a269"/>
   </g>
-  <circle cx="91" cy="100" r="3.5" fill="#986a44"/>
-  <path d="M100 95h16M100 105h11" stroke="#e5a50a" stroke-width="4" stroke-linecap="round"/>
+  <!-- A small one in front -->
+  <rect x="38" y="62" width="36" height="38" rx="6" fill="#f6f5f4"/>
+  <rect x="43" y="67" width="26" height="26" rx="3" fill="#ed333b"/>
+  <path d="M56 71l2.7 5.6 6.1.8-4.5 4.2 1.1 6.1-5.4-3-5.4 3 1.1-6.1-4.5-4.2 6.1-.8z" fill="#f9f06b"/>
+  <!-- The shelf: a board with a darker front edge -->
+  <rect x="6" y="104" width="116" height="14" rx="4" fill="#865e3c"/>
+  <rect x="6" y="98" width="116" height="14" rx="4" fill="#b5835a"/>
 </svg>
