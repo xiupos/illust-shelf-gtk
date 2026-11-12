@@ -192,7 +192,7 @@ impl Component for Detail {
     type Widgets = Widgets;
 
     fn init_root() -> adw::NavigationPage {
-        adw::NavigationPage::builder().title("Illust Viewer").build()
+        adw::NavigationPage::builder().title("Illust Shelf").build()
     }
 
     fn init(lib: Lib, page: adw::NavigationPage, sender: ComponentSender<Self>) -> ComponentParts<Self> {

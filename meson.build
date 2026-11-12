@@ -1,18 +1,18 @@
-project('illust-viewer', version: '0.1.0', license: 'MIT', meson_version: '>= 0.59')
+project('illust-shelf-gtk', version: '0.1.0', license: 'MIT', meson_version: '>= 0.59')
 
-id = 'net.xiupos.IllustViewer'
+id = 'net.xiupos.IllustShelf.Gtk'
 datadir = get_option('datadir')
 manifest = meson.project_source_root() / 'Cargo.toml'
 
 # Cargo builds the app; Meson installs it
 cargo = find_program('cargo')
 custom_target(
-  'illust-viewer',
-  output: 'illust-viewer',
+  'illust-shelf-gtk',
+  output: 'illust-shelf-gtk',
   command: [
     cargo, 'build', '--release', '--manifest-path', manifest,
     '--target-dir', meson.project_build_root() / 'target',
-    '&&', 'cp', 'target' / 'release' / 'illust-viewer', '@OUTPUT@',
+    '&&', 'cp', 'target' / 'release' / 'illust-shelf-gtk', '@OUTPUT@',
   ],
   build_always_stale: true,
   build_by_default: true,

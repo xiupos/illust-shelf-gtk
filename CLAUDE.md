@@ -53,17 +53,17 @@ Xvfb :99 -screen 0 1280x800x24 -nolisten tcp &
 ```
 
 ```bash
-mkdir -p /tmp/iv/config/net.xiupos.IllustViewer /tmp/iv/cache /tmp/iv/pics
+mkdir -p /tmp/iv/config/net.xiupos.IllustShelf.Gtk /tmp/iv/cache /tmp/iv/pics
 ```
 
 ```bash
-echo '{"folder":"/tmp/iv/pics","zoom":192}' > /tmp/iv/config/net.xiupos.IllustViewer/config.json
+echo '{"folder":"/tmp/iv/pics","zoom":192}' > /tmp/iv/config/net.xiupos.IllustShelf.Gtk/config.json
 ```
 
 Put test images and sidecars in `/tmp/iv/pics`, then launch:
 
 ```bash
-dbus-run-session -- env GTK_A11Y=none DISPLAY=:99 WAYLAND_DISPLAY= GDK_BACKEND=x11 GSK_RENDERER=cairo GDK_DEBUG=no-portals XDG_CONFIG_HOME=/tmp/iv/config XDG_CACHE_HOME=/tmp/iv/cache ./target/debug/illust-viewer
+dbus-run-session -- env GTK_A11Y=none DISPLAY=:99 WAYLAND_DISPLAY= GDK_BACKEND=x11 GSK_RENDERER=cairo GDK_DEBUG=no-portals XDG_CONFIG_HOME=/tmp/iv/config XDG_CACHE_HOME=/tmp/iv/cache ./target/debug/illust-shelf-gtk
 ```
 
 - `dbus-run-session`: with the same app ID on the same bus, a second instance hands off to the user's running one and exits.
@@ -83,7 +83,7 @@ DISPLAY=:99 import -window root /tmp/iv/shot.png
 Caveats:
 
 - Take a screenshot before clicking by coordinates: rows move as tags and URLs are added.
-- Stop the test instance by PID, after checking that `/proc/<pid>/exe` is the build under `target/`. `pkill -x illust-viewer` also kills the user's instance, and `pkill -f` kills the shell that runs it.
+- Stop the test instance by PID, after checking that `/proc/<pid>/exe` is the build under `target/`. `pkill -x illust-shelf-gtk` also kills the user's instance, and `pkill -f` kills the shell that runs it.
 - Do not click anything that launches another app (the detail page's menu, URL rows): it opens on the real display.
 - There is no window manager: the window sits at (0, 0) with its default size (1100×760), and fullscreen cannot be tested. `xdotool windowsize` resizes it.
 - `Escape` on the detail page goes back; do not use it to close popovers.

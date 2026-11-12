@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>net.xiupos.IllustViewer</id>
-  <name>Illust Viewer</name>
+  <id>net.xiupos.IllustShelf.Gtk</id>
+  <name>Illust Shelf</name>
   <summary>Browse and organize illustrations with tags</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
@@ -10,7 +10,7 @@
   </developer>
   <description>
     <p>
-      Illust Viewer shows the illustrations of a local folder as a gallery, and lets you give them
+      Illust Shelf shows the illustrations of a local folder as a gallery, and lets you give them
       a title, tags, source URLs, and a note. The metadata is stored next to each image in a
       sidecar JSON file, so it stays with the image when the folder is synced or moved.
     </p>
@@ -20,7 +20,7 @@
       <li>Add images by drag and drop or from the clipboard</li>
     </ul>
   </description>
-  <launchable type="desktop-id">net.xiupos.IllustViewer.desktop</launchable>
+  <launchable type="desktop-id">net.xiupos.IllustShelf.Gtk.desktop</launchable>
   <url type="homepage">https://github.com/xiupos/illust-viewer-gtk</url>
   <url type="bugtracker">https://github.com/xiupos/illust-viewer-gtk/issues</url>
   <url type="vcs-browser">https://github.com/xiupos/illust-viewer-gtk</url>

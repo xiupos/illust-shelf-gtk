@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 use ui::Lib;
 
-const APP_ID: &str = "net.xiupos.IllustViewer";
+const APP_ID: &str = "net.xiupos.IllustShelf.Gtk";
 /// Thumbnail sizes in px: Small, Medium, Large
 const ZOOMS: [u32; 3] = [128, 192, 256];
 const DEFAULT_ZOOM: u32 = 192;
@@ -126,7 +126,7 @@ fn main_menu() -> gio::Menu {
     folder.append(Some("Choose Folder…"), Some("win.choose-folder"));
     folder.append(Some("Reload"), Some("win.reload"));
     let app = gio::Menu::new();
-    app.append(Some("About Illust Viewer"), Some("app.about"));
+    app.append(Some("About Illust Shelf"), Some("app.about"));
     let menu = gio::Menu::new();
     menu.append_section(Some("Thumbnail Size"), &zoom);
     menu.append_section(None, &folder);
@@ -137,7 +137,7 @@ fn main_menu() -> gio::Menu {
 fn status_page(status: &adw::StatusPage, header: &adw::HeaderBar) -> adw::NavigationPage {
     let view = adw::ToolbarView::builder().content(status).build();
     view.add_top_bar(header);
-    adw::NavigationPage::new(&view, "Illust Viewer")
+    adw::NavigationPage::new(&view, "Illust Shelf")
 }
 
 fn loading_page() -> adw::NavigationPage {
@@ -189,7 +189,7 @@ impl Component for App {
 
     fn init_root() -> adw::ApplicationWindow {
         adw::ApplicationWindow::builder()
-            .title("Illust Viewer")
+            .title("Illust Shelf")
             .default_width(1100)
             .default_height(760)
             .width_request(360)
@@ -250,7 +250,7 @@ impl Component for App {
         narrow.add_setter(&switcher, "visible", Some(&false.to_value()));
         let bin = ui::bin(&top_search.view);
         bin.add_breakpoint(narrow);
-        let top = adw::NavigationPage::new(&bin, "Illust Viewer");
+        let top = adw::NavigationPage::new(&bin, "Illust Shelf");
 
         let g = tag_gallery.sender().clone();
         let tag_search = ui::search_view(&adw::HeaderBar::new(), tag_gallery.widget(), move |query| {
@@ -292,7 +292,7 @@ impl Component for App {
         let w = window.downgrade();
         ui::action(&app, "about", move || {
             let dialog = adw::AboutDialog::builder()
-                .application_name("Illust Viewer")
+                .application_name("Illust Shelf")
                 .application_icon(APP_ID)
                 .version(env!("CARGO_PKG_VERSION"))
                 .comments("Browse and organize illustrations with tags")
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn config_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("illust-viewer-test-{}-config", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("illust-shelf-test-{}-config", std::process::id()));
         let path = dir.join("app/config.json");
         assert_eq!(Config::load(&path).zoom, 0);
         Config { folder: Some("/a".into()), zoom: 256 }.save(&path).unwrap();

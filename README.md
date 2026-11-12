@@ -1,4 +1,4 @@
-# illust-viewer
+# illust-shelf-gtk
 
 A GNOME app for browsing and organizing illustrations in a local folder, with metadata such as tags and sources.
 
@@ -35,7 +35,7 @@ cargo build --release
 ```
 
 ```bash
-./target/release/illust-viewer
+./target/release/illust-shelf-gtk
 ```
 
 Tests:
@@ -60,8 +60,8 @@ This builds the app and installs it with its icon and its entry in the app list.
 
 ## Data
 
-- Settings: `~/.config/net.xiupos.IllustViewer/config.json` (the folder and thumbnail size)
-- Thumbnails: `~/.cache/net.xiupos.IllustViewer/thumbs/` (safe to delete; recreated on the next launch). Thumbnails made by earlier versions are not reused; delete the folder once to reclaim the space
+- Settings: `~/.config/net.xiupos.IllustShelf.Gtk/config.json` (the folder and thumbnail size)
+- Thumbnails: `~/.cache/net.xiupos.IllustShelf.Gtk/thumbs/` (safe to delete; recreated on the next launch). Thumbnails made by earlier versions are not reused; delete the folder once to reclaim the space
 
 ## Usage
 
