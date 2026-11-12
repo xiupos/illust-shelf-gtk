@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#613583"/>
+      <stop offset="0.6" stop-color="#dc8add"/>
+      <stop offset="1" stop-color="#ffbe6f"/>
+    </linearGradient>
+    <clipPath id="picture">
+      <rect x="16" y="26" width="96" height="74" rx="4"/>
+    </clipPath>
+  </defs>
+  <!-- A second illustration behind -->
+  <rect x="20" y="10" width="88" height="40" rx="8" fill="#c0bfbc"/>
+  <rect x="20" y="10" width="88" height="36" rx="8" fill="#deddda"/>
+  <!-- The card: a darker lip under a light face -->
+  <rect x="8" y="22" width="112" height="94" rx="10" fill="#c0bfbc"/>
+  <rect x="8" y="18" width="112" height="90" rx="10" fill="#f6f5f4"/>
+  <!-- The illustration -->
+  <g clip-path="url(#picture)">
+    <rect x="16" y="26" width="96" height="74" fill="url(#sky)"/>
+    <circle cx="80" cy="60" r="13" fill="#f9f06b"/>
+    <path d="M16 100V74l22-22 26 26 12-10 36 28v4z" fill="#1c71d8"/>
+    <path d="M16 100V86l14-10 30 24z" fill="#1a5fb4"/>
+  </g>
+  <!-- The tag -->
+  <g stroke-linejoin="round" stroke-width="6">
+    <path d="M80 104l12-12h27v24H92z" fill="#e5a50a" stroke="#e5a50a"/>
+    <path d="M80 100l12-12h27v24H92z" fill="#f6d32d" stroke="#f6d32d"/>
+  </g>
+  <circle cx="91" cy="100" r="3.5" fill="#986a44"/>
+  <path d="M100 95h16M100 105h11" stroke="#e5a50a" stroke-width="4" stroke-linecap="round"/>
+</svg>

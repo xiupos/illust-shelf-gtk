@@ -13,6 +13,7 @@ The UI is built with [Relm4](https://relm4.org) components, which talk through m
 | `src/detail.rs` | `Detail`: one image and the pane that edits its sidecar |
 | `src/ui.rs`, `src/style.css` | Shared widgets, and the CSS |
 | `src/library.rs` | The images of a folder and their sidecars: scanning, thumbnails, filtering, saving, importing. No GTK. Has the tests |
+| `data/`, `meson.build` | The icons, the desktop entry, and the AppStream metadata. Meson installs them, and has cargo build the app |
 
 Crates are renamed: `gtk` is gtk4 and `adw` is libadwaita, at the versions relm4 uses. Check with `cargo test`, `cargo clippy --all-targets`, and `cargo fmt`.
 

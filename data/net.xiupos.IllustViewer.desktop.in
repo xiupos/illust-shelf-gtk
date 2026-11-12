@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Illust Viewer
+Comment=Browse and organize illustrations with tags
+Exec=@bindir@/illust-viewer
+Icon=net.xiupos.IllustViewer
+Terminal=false
+StartupNotify=true
+Categories=Graphics;Viewer;GTK;
+Keywords=illustration;image;picture;gallery;tag;

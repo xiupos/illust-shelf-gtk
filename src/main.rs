@@ -199,6 +199,10 @@ impl Component for App {
 
     fn init(_: (), window: adw::ApplicationWindow, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         relm4::set_global_css(include_str!("style.css"));
+        // The app's icon, where the app is not installed
+        #[cfg(debug_assertions)]
+        gtk::IconTheme::for_display(&WidgetExt::display(&window))
+            .add_search_path(concat!(env!("CARGO_MANIFEST_DIR"), "/data/icons"));
         let mut config = Config::load(&config_path());
         if !ZOOMS.contains(&config.zoom) {
             config.zoom = DEFAULT_ZOOM;
@@ -289,9 +293,12 @@ impl Component for App {
         ui::action(&app, "about", move || {
             let dialog = adw::AboutDialog::builder()
                 .application_name("Illust Viewer")
-                .application_icon("image-x-generic")
+                .application_icon(APP_ID)
                 .version(env!("CARGO_PKG_VERSION"))
-                .comments("Browse and organize illustrations with sidecar metadata")
+                .comments("Browse and organize illustrations with tags")
+                .website("https://github.com/xiupos/illust-viewer-gtk")
+                .issue_url("https://github.com/xiupos/illust-viewer-gtk/issues")
+                .license_type(gtk::License::MitX11)
                 .build();
             dialog.present(w.upgrade().as_ref());
         });

@@ -44,6 +44,20 @@ Tests:
 cargo test
 ```
 
+## Install
+
+Needs [Meson](https://mesonbuild.com) (`meson` in the package managers above).
+
+```bash
+meson setup build --prefix ~/.local
+```
+
+```bash
+meson install -C build
+```
+
+This builds the app and installs it with its icon and its entry in the app list. Without `--prefix` it goes to `/usr/local`. `ninja -C build uninstall` removes it again.
+
 ## Data
 
 - Settings: `~/.config/net.xiupos.IllustViewer/config.json` (the folder and thumbnail size)
@@ -78,3 +92,7 @@ The sidecar is read when an image is opened and rewritten on every change, so do
 | F9 | Show or hide the details pane (detail page) |
 | F11 | Fullscreen (Escape leaves it) |
 | Ctrl+Q | Quit |
+
+## License
+
+[MIT](LICENSE)
