@@ -1,8 +1,8 @@
 # illust-viewer
 
-A GNOME app for browsing and organizing illustrations in a local folder, along with metadata such as source and creator.
+A GNOME app for browsing and organizing illustrations in a local folder, with metadata such as tags and sources.
 
-Metadata is stored in sidecar JSON files (illust-sidecar v1) next to each image. See [`illust-sidecar.schema.json`](illust-sidecar.schema.json) for the spec. The sidecar for `foo.png` is `foo.png.json`. Sidecars with broken JSON or a `v` other than 1 are treated as read-only and are never overwritten.
+Metadata is stored next to each image in a sidecar JSON file: `foo.png.json` for `foo.png`. See [`illust-sidecar.schema.json`](illust-sidecar.schema.json) for the format. Sidecars that cannot be read or have a `v` other than 1 are read-only and are never overwritten. Unknown keys are kept.
 
 ## Requirements
 
@@ -44,22 +44,28 @@ Tests:
 cargo test
 ```
 
-## Where data is stored
+## Data
 
-- Settings: `~/.config/net.xiupos.IllustViewer/config.json` (the chosen folder and thumbnail size)
-- Thumbnails: `~/.cache/net.xiupos.IllustViewer/thumbs/` (safe to delete; they are recreated on the next launch)
+- Settings: `~/.config/net.xiupos.IllustViewer/config.json` (the folder and thumbnail size)
+- Thumbnails: `~/.cache/net.xiupos.IllustViewer/thumbs/` (safe to delete; recreated on the next launch). Thumbnails made by earlier versions are not reused; delete the folder once to reclaim the space
 
 ## Usage
 
-- On first launch, use "Choose Folder" (Ctrl+O) to pick the folder with your illustrations. Subfolders are included. To view illustrations stored elsewhere, put symlinks to them in that folder.
-- To add images, use the + button at the top left of the main page or drop image files on the window. They are copied into the folder under a UUIDv7 name that keeps the extension (e.g. `01a1bb29-12c8-73cb-af91-748ad016aacc.JPG`, so names sort by when they were added), each with a new sidecar holding only `v` and `added`. Ctrl+V on the main page pastes too: copied image files are added as they are, and copied image data (a screenshot, an image copied in a browser) is saved as PNG.
-- Supported formats are png, jpg, jpeg, webp, and gif. Hidden files and `*.sync-conflict-*` files are skipped.
-- On the detail page you can edit the title, tags, source URLs, and note. Tags and URLs are lists: remove one with ×, add one in the last row, and right click (or long press, or Menu / Shift+F10 on a focused row) a value for Open, Copy, and Remove. Ctrl+C on a focused row copies it. While you type a tag, the most used existing tag that starts with it is shown above the text ("Tab: creator:Alice"); press Tab to fill it in. Enter adds what you typed. Clicking a tag opens its gallery; clicking a URL opens it in the browser. Changes are saved once, when you leave the page, reload, or close the window. Fields you did not change are left as they are on disk, so you can also edit the sidecar in a text editor.
-- "Move to Trash" at the bottom of the detail page moves the image and its sidecar to the trash, after a confirmation; restore them from the trash in Files if needed.
-- On the detail page, the menu (☰) opens the image in your image viewer (for zooming), opens its folder in Files, or opens the sidecar in your text editor (creating it if needed).
-- Creators, ratings, age ratings, and works are plain tags: `creator:Name`, `rating:1`–`rating:5`, `age:general` / `age:sensitive` / `age:questionable` / `age:explicit`, and `set:Work`. The app treats them all alike: the Tags tab groups tags by namespace ("Creator", "Set", …, then "Other Tags" for tags without one), each showing one row of its most used tags as tiles (named without the prefix) with their newest image (a `set:` shows its first page); click a section's title to see all its tags, and typing a prefix such as `creator:` in the search narrows it to that kind. A `set:` gallery is in file name order; all others show the newest files first.
-- The detail page is laid out like GNOME's Image Viewer: the (i) button (or F9) shows the details pane, on the right or, in a narrow window, below the image. Moving the mouse shows previous / next buttons at the bottom left; they, or Left / Right, step to the previous or next image in the gallery you came from: search results, a tag's gallery, or a `set:` in file name order.
-- When folder contents change, press Ctrl+R to reload (files are not watched).
+**Folder.** Choose the folder with your illustrations (Ctrl+O). Subfolders are included; for illustrations stored elsewhere, put symlinks in it. png, jpg, jpeg, webp, and gif are supported. Hidden files and `*.sync-conflict-*` files are skipped. The folder is not watched: press Ctrl+R after changing its contents.
+
+**Adding images.** Use the + button, drop files on the window, or press Ctrl+V on the main page (copied files, or copied image data, which is saved as PNG). Images are copied into the folder under a UUIDv7 name with their extension, so names sort by when they were added, each with a sidecar holding `v` and `added`.
+
+**Tags.** Creators, ratings, and works are plain tags with a namespace: `creator:Name`, `rating:5`, `age:general`, `set:Work`. The Tags tab has a row per namespace, most used tags first; scroll a row sideways, or click its heading to see its tags as a grid. Searching there filters tags by name. Galleries show the newest files first, except a `set:` tag's, which is in file name order.
+
+**Details.** Click an image to edit its title, tags, source URLs, and note. Every change is saved at once.
+
+- To add a tag or a URL, type it in the last row and press Enter. While you type a tag, the most used tags that start with it are listed below; click one to add it.
+- Clicking a tag opens its gallery, and clicking a URL opens the browser. The ⋮ button of a row has Open, Copy, and Remove.
+- The previous / next buttons (or Left / Right) step through the gallery you came from.
+- The menu (☰) opens the image in your image viewer (for zooming), its folder, or its sidecar in a text editor.
+- "Move to Trash" moves the image and its sidecar to the trash.
+
+The sidecar is read when an image is opened and rewritten on every change, so do not edit it elsewhere while its image is open.
 
 | Key | Action |
 |---|---|
@@ -67,8 +73,8 @@ cargo test
 | Ctrl+R | Reload |
 | Ctrl+Plus / Ctrl+Minus / Ctrl+0 | Thumbnail size |
 | Ctrl+O | Choose folder |
-| Ctrl+V | Add images from the clipboard (on the main page) |
-| Left / Right | Previous / next image (on the detail page) |
-| F9 | Show or hide the details pane (the (i) button) |
-| F11 | Fullscreen (on the detail page; Escape leaves it) |
+| Ctrl+V | Add images from the clipboard (main page) |
+| Left / Right | Previous / next image (detail page) |
+| F9 | Show or hide the details pane (detail page) |
+| F11 | Fullscreen (Escape leaves it) |
 | Ctrl+Q | Quit |

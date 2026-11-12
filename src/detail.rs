@@ -1,715 +1,608 @@
-//! Detail page. Built once when opened; edits are saved once, when the page is hidden
-//! or the window closes (main.rs activates `detail.save` then).
+//! One image, and the pane that edits its sidecar. Every edit is saved at once.
 
-use crate::model::{Item, Library};
+use crate::library::Meta;
+use crate::ui::{self, Lib};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use std::cell::RefCell;
-use std::path::Path;
+use relm4::prelude::*;
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-/// Saves the page's edits. Does nothing if nothing changed
-pub const SAVE: &str = "detail.save";
-/// Edited fields, in the order of the editors
-const FIELDS: [&str; 4] = ["title", "tags", "urls", "note"];
+/// The number of tags suggested while typing one
+const SUGGESTIONS: usize = 5;
 
-thread_local! {
-    /// Whether the details pane is shown, kept from page to page like GNOME's Image Viewer does
-    static SHOW_DETAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+pub struct Detail {
+    lib: Lib,
+    /// The gallery the page was opened from, which previous / next step through
+    paths: Vec<PathBuf>,
+    index: usize,
+    meta: Meta,
+    editable: bool,
+    /// Every tag in use, most used first
+    known: Vec<String>,
 }
 
-/// `tag` ("" for all) and `query` describe the gallery the page was opened from; the previous and
-/// next buttons (and the Left / Right keys) step through that gallery's order
-pub fn page(lib: &Rc<RefCell<Library>>, path: &Path, tag: &str, query: &str) -> adw::NavigationPage {
-    // Pick up changes made in a text editor since the library was loaded
-    lib.borrow_mut().refresh(path);
-    let item = lib.borrow().get(path).cloned().unwrap_or_else(|| Item {
-        path: path.to_owned(),
-        meta: serde_json::json!({"v": 1}),
-        editable: false,
-    });
-    let editable = item.editable;
-
-    let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).can_shrink(true).build();
-    picture.set_paintable(texture(path).as_ref());
-
-    let panel = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(24)
-        .margin_top(24)
-        .margin_bottom(24)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
-    let title = adw::EntryRow::builder().title("Title").text(item.text("title")).sensitive(editable).build();
-    panel.append(&group(None, &title));
-
-    // Tag rows open the tag's gallery; URL rows open the browser
-    // Typing a tag suggests the most used existing tag that starts with it
-    let known: Vec<String> = lib.borrow().facets().into_iter().map(|(tag, _, _)| tag).collect();
-    let (tags_group, tags) = list_editor("Tags", "Add Tag", item.tags(), known, editable, |row, tag| {
-        row.set_action_name(Some("win.show-scope"));
-        row.set_action_target_value(Some(&tag.to_variant()));
-    });
-    panel.append(&tags_group);
-    let (urls_group, urls) = list_editor("Sources", "Add URL", item.urls(), vec![], editable, |row, _| {
-        row.set_title_lines(1);
-        row.add_suffix(&gtk::Image::from_icon_name("adw-external-link-symbolic"));
-        row.connect_activated(|row| {
-            let window = row.root().and_downcast::<gtk::Window>();
-            let w = window.clone();
-            gtk::UriLauncher::new(&row.title()).launch(window.as_ref(), gio::Cancellable::NONE, move |r| {
-                if let (Err(e), Some(w)) = (r, w) {
-                    toast(&w, &format!("Could not open: {}", e.message()));
-                }
-            });
-        });
-    });
-    panel.append(&urls_group);
-
-    let note = gtk::TextView::builder()
-        .wrap_mode(gtk::WrapMode::WordChar)
-        .editable(editable)
-        .top_margin(10)
-        .bottom_margin(10)
-        .left_margin(10)
-        .right_margin(10)
-        .height_request(100)
-        .build();
-    note.buffer().set_text(&item.text("note"));
-    panel.append(&group(Some("Note"), &gtk::Frame::builder().child(&note).css_classes(["view"]).build()));
-
-    // As in GNOME's Image Viewer's properties: the folder with a button to open it, then the path
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let property = |title: &str, value: &str| {
-        adw::ActionRow::builder()
-            .title(title)
-            .subtitle(value)
-            .subtitle_selectable(true)
-            .subtitle_lines(1)
-            .use_markup(false)
-            .css_classes(["property"])
-            .build()
-    };
-    let parent = path.parent().unwrap_or(path);
-    let folder = property("Folder", &parent.file_name().unwrap_or_default().to_string_lossy());
-    let open = gtk::Button::builder()
-        .icon_name("folder-open-symbolic")
-        .tooltip_text("Open Containing Folder")
-        .valign(gtk::Align::Center)
-        .action_name("detail.open-folder")
-        .css_classes(["flat"])
-        .build();
-    folder.add_suffix(&open);
-    folder.set_activatable_widget(Some(&open));
-    let file = adw::PreferencesGroup::new();
-    file.add(&folder);
-    file.add(&property("Path", &path.to_string_lossy()));
-    panel.append(&file);
-    // Destructive, so last, and confirmed first. Trash rather than delete, so it can be undone in Files
-    let trash = adw::ButtonRow::builder()
-        .title("Move to Trash")
-        .start_icon_name("user-trash-symbolic")
-        .action_name("detail.trash")
-        .build();
-    // Added, not set: setting the classes would drop the row's own `button` class
-    trash.add_css_class("destructive-action");
-    panel.append(&group(None, &trash));
-
-    let near = siblings(lib, path, tag, query);
-    // Opens the image, its folder, or the sidecar in other apps (GNOME's image viewer handles
-    // zooming, so the app does not)
-    let menu = gio::Menu::new();
-    menu.append(Some("Open in Image Viewer"), Some("detail.open-image"));
-    menu.append(Some("Open Containing Folder"), Some("detail.open-folder"));
-    menu.append(Some("Edit Sidecar in Text Editor"), Some("detail.edit-sidecar"));
-    let more = menu_button(&menu);
-    let (image, poke) = image_with_controls(&picture, &near, &more);
-
-    // Layout of GNOME's Image Viewer: the details pane on the right, or below the image when
-    // narrow, both shown by the (i) button or F9
-    let toggle = gtk::ToggleButton::builder()
-        .icon_name("help-about-symbolic")
-        .tooltip_text("Details")
-        .active(SHOW_DETAILS.get())
-        .build();
-    toggle.connect_toggled(|t| SHOW_DETAILS.set(t.is_active()));
-    let sidebar = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .propagate_natural_height(true)
-        .max_content_height(316)
-        .child(&panel)
-        .build();
-    let split = adw::OverlaySplitView::builder()
-        .sidebar_position(gtk::PackType::End)
-        .min_sidebar_width(255.0)
-        .content(&adw::LayoutSlot::new("content"))
-        .sidebar(&adw::LayoutSlot::new("details"))
-        .build();
-    let bottom = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideUp)
-        .child(&adw::LayoutSlot::new("details"))
-        .css_classes(["bottom-details"])
-        .build();
-    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let slot = adw::LayoutSlot::builder().id("content").vexpand(true).build();
-    column.append(&slot);
-    column.append(&bottom);
-    let layouts = adw::MultiLayoutView::new();
-    for (name, content) in [("wide", split.upcast_ref::<gtk::Widget>()), ("narrow", column.upcast_ref())] {
-        let layout = adw::Layout::new(content);
-        layout.set_name(Some(name));
-        layouts.add_layout(layout);
-    }
-    layouts.set_child("content", &image);
-    layouts.set_child("details", &sidebar);
-    layouts.set_layout_name("wide");
-    toggle.bind_property("active", &split, "show-sidebar").bidirectional().sync_create().build();
-    toggle.bind_property("active", &bottom, "reveal-child").bidirectional().sync_create().build();
-    let header = adw::HeaderBar::new();
-    header.pack_start(&fullscreen_button());
-    header.pack_end(&more);
-    header.pack_end(&toggle);
-    // The border variant of raised, to avoid a shadow over the image; the read-only banner sits
-    // below the header
-    let view =
-        adw::ToolbarView::builder().content(&layouts).top_bar_style(adw::ToolbarStyle::RaisedBorder).build();
-    view.add_top_bar(&header);
-    if !editable {
-        let banner = adw::Banner::new("Read-only: the sidecar is unreadable or has an unsupported version");
-        banner.set_revealed(true);
-        view.add_top_bar(&banner);
-    }
-    let t = toggle.clone();
-    let f9 = gtk::CallbackAction::new(move |_, _| {
-        t.set_active(!t.is_active());
-        glib::Propagation::Stop
-    });
-    let shortcuts = gtk::ShortcutController::new();
-    shortcuts.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("F9"), Some(f9)));
-    // F11 toggles fullscreen; Escape leaves it, and goes back only when not fullscreen
-    let f11 = gtk::CallbackAction::new(|page, _| {
-        toggle_fullscreen(page);
-        glib::Propagation::Stop
-    });
-    shortcuts.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("F11"), Some(f11)));
-    let escape = gtk::CallbackAction::new(|page, _| match page.root().and_downcast::<gtk::Window>() {
-        Some(window) if window.is_fullscreen() => {
-            window.unfullscreen();
-            glib::Propagation::Stop
-        }
-        _ => glib::Propagation::Proceed,
-    });
-    shortcuts.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string("Escape"), Some(escape)));
-    // Left / Right reach this only when no focused widget (a text field, a list) used them
-    for (key, target) in near {
-        let shortcut = gtk::Shortcut::new(
-            gtk::ShortcutTrigger::parse_string(key),
-            Some(gtk::NamedAction::new("win.show-sibling")),
-        );
-        shortcut.set_arguments(target.as_ref());
-        shortcuts.add_shortcut(shortcut);
-    }
-    view.add_controller(shortcuts);
-    let bin = adw::BreakpointBin::builder().width_request(360).height_request(300).child(&view).build();
-    let narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 590sp").unwrap());
-    narrow.add_setter(&layouts, "layout-name", Some(&"narrow".to_value()));
-    bin.add_breakpoint(narrow);
-    // Pointer motion anywhere on the page shows the image controls. GTK also reports motion
-    // without a move when widgets change under a still pointer, so only real moves count
-    let motion = gtk::EventControllerMotion::new();
-    let (p, last) = (poke.clone(), std::cell::Cell::new((-1.0, -1.0)));
-    motion.connect_motion(move |_, x, y| {
-        if last.replace((x, y)) != (x, y) {
-            p();
-        }
-    });
-    bin.add_controller(motion);
-    let page = adw::NavigationPage::new(&bin, &name);
-
-    // Saving: compare each field with what was last saved and write only the changed ones,
-    // on top of the sidecar re-read from disk (so text editor changes to other fields survive)
-    let texts = move || {
-        let buffer = note.buffer();
-        let note = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
-        [title.text().to_string(), tags(), urls(), note]
-    };
-    let saved = RefCell::new(texts());
-    // Shared: a cloned WeakRef is a separate reference, which setting this one would not update
-    let window = Rc::new(glib::WeakRef::<gtk::Window>::new());
-    let w = window.clone();
-    page.connect_map(move |page| w.set(page.root().and_downcast::<gtk::Window>().as_ref()));
-    let (l, image, w, sidecar) = (lib.clone(), path.to_owned(), window.clone(), item.sidecar_path());
-    let (trashed, trash_window) = (path.to_owned(), window.clone());
-    let save = gio::SimpleAction::new("save", None);
-    let (lib, path) = (lib.clone(), path.to_owned());
-    save.connect_activate(move |_, _| {
-        let current = texts();
-        let changed: Vec<(&str, &String)> = FIELDS
-            .into_iter()
-            .zip(&current)
-            .zip(saved.borrow().iter())
-            .filter(|((_, now), before)| now != before)
-            .map(|(field, _)| field)
-            .collect();
-        if changed.is_empty() {
-            return;
-        }
-        let result = lib.borrow_mut().edit(&path, &now(), |it| {
-            for (key, text) in &changed {
-                it.set_text(key, text);
-            }
-        });
-        match result {
-            Ok(()) => *saved.borrow_mut() = current.clone(),
-            Err(e) => {
-                if let Some(w) = window.upgrade() {
-                    toast(&w, &format!("Could not save: {e}"));
-                }
-            }
-        }
-    });
-    let actions = gio::SimpleActionGroup::new();
-    actions.add_action(&save);
-    for (name, folder) in [("open-image", false), ("open-folder", true)] {
-        let action = gio::SimpleAction::new(name, None);
-        let (image, w) = (image.clone(), w.clone());
-        action.connect_activate(move |_, _| launch(&w, &image, folder));
-        actions.add_action(&action);
-    }
-    let edit = gio::SimpleAction::new("edit-sidecar", None);
-    let s = save.clone();
-    edit.connect_activate(move |_, _| {
-        // Save pending edits first, and create {"v":1,"added":…} if there is no sidecar
-        s.activate(None);
-        let result = l.borrow_mut().create(&image, &now());
-        if let (Err(e), Some(win)) = (result, w.upgrade()) {
-            toast(&win, &format!("Could not create the sidecar: {e}"));
-        }
-        launch(&w, &sidecar, false);
-    });
-    actions.add_action(&edit);
-    let trash = gio::SimpleAction::new("trash", None);
-    let (image, sidecar, w, s) = (trashed, item.sidecar_path(), trash_window, save.clone());
-    trash.connect_activate(move |_, _| {
-        let Some(win) = w.upgrade() else { return };
-        let name = image.file_name().unwrap_or_default().to_string_lossy();
-        let dialog = adw::AlertDialog::new(
-            Some("Move to Trash?"),
-            Some(&format!("“{name}” and its sidecar will be moved to the trash.")),
-        );
-        dialog.add_responses(&[("cancel", "_Cancel"), ("trash", "_Move to Trash")]);
-        dialog.set_response_appearance("trash", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
-        let (image, sidecar, s, w) = (image.clone(), sidecar.clone(), s.clone(), win.clone());
-        dialog.connect_response(Some("trash"), move |_, _| {
-            let trash = |p: &Path| match p.exists() {
-                true => gio::File::for_path(p).trash(gio::Cancellable::NONE),
-                false => Ok(()),
-            };
-            if let Err(e) = trash(&image) {
-                toast(&w, &format!("Could not move to the trash: {}", e.message()));
-                return;
-            }
-            // Never save a trashed image's edits: that would leave a sidecar behind
-            s.set_enabled(false);
-            match trash(&sidecar) {
-                Ok(()) => toast(&w, "Moved to Trash"),
-                Err(e) => toast(&w, &format!("Could not move the sidecar to the trash: {}", e.message())),
-            }
-            let _ = w.activate_action("win.reload", None);
-        });
-        dialog.present(Some(&win));
-    });
-    actions.add_action(&trash);
-    page.insert_action_group("detail", Some(&actions));
-    page.connect_hidden(|page| {
-        let _ = page.activate_action(SAVE, None);
-    });
-
-    // By default the title field gets focus with its text selected, and a keystroke would
-    // replace it
-    page.connect_shown(move |_| {
-        toggle.grab_focus();
-        poke();
-    });
-    page
+pub struct Widgets {
+    picture: gtk::Picture,
+    banner: adw::Banner,
+    /// Previous and next
+    steps: [gtk::Button; 2],
+    /// Shows the pane
+    details: gtk::ToggleButton,
+    title: adw::EntryRow,
+    note: gtk::TextView,
+    tags: List,
+    urls: List,
+    suggestions: gtk::ListBox,
+    folder: adw::ActionRow,
+    path: adw::ActionRow,
+    /// Set while the fields are filled in from code, which is not an edit
+    loading: Rc<Cell<bool>>,
 }
 
-/// For the previous and next images: (key, `win.show-sibling` target, if there is one)
-fn siblings(
-    lib: &Rc<RefCell<Library>>,
-    path: &Path,
-    tag: &str,
-    query: &str,
-) -> [(&'static str, Option<glib::Variant>); 2] {
-    let lib = lib.borrow();
-    let paths = lib.paths(Some(tag).filter(|t| !t.is_empty()), query);
-    let i = paths.iter().position(|p| Path::new(p) == path);
-    let at = |i: Option<usize>| i.and_then(|i| paths.get(i)).map(|p| (*p, tag, query).to_variant());
-    [("Left", at(i.and_then(|i| i.checked_sub(1)))), ("Right", at(i.map(|i| i + 1)))]
+/// The rows of the tags or the URLs, and the row that adds one
+struct List {
+    rows: gtk::ListBox,
+    entry: adw::EntryRow,
 }
 
-/// The image with previous / next buttons at its bottom left, as in GNOME's Image Viewer (whose
-/// style and timings these copy). The returned closure shows them; they fade out after 3 s
-/// unless the pointer is on them or the menu is open
-fn image_with_controls(
-    picture: &gtk::Picture,
-    near: &[(&str, Option<glib::Variant>); 2],
-    menu: &gtk::MenuButton,
-) -> (gtk::Overlay, Rc<dyn Fn()>) {
-    let controls = gtk::Box::builder()
-        .spacing(6)
-        .halign(gtk::Align::Start)
-        .valign(gtk::Align::End)
-        .css_classes(["osd-box"])
-        .build();
-    for ((icon, tooltip), (_, target)) in
-        [("go-previous-symbolic", "Previous Image"), ("go-next-symbolic", "Next Image")].into_iter().zip(near)
-    {
-        let button = gtk::Button::builder()
-            .icon_name(icon)
-            .tooltip_text(tooltip)
-            .sensitive(target.is_some())
+#[derive(Debug, Clone, Copy)]
+pub enum Field {
+    Tags,
+    Urls,
+}
+
+/// What a row's menu does. Clicking the row opens it
+#[derive(Debug, Clone, Copy)]
+pub enum Act {
+    /// A tag's gallery, or a URL in the browser
+    Open,
+    Copy,
+    Remove,
+}
+
+/// What the page's menu opens in other apps
+#[derive(Debug, Clone, Copy)]
+pub enum Target {
+    Image,
+    Folder,
+    Sidecar,
+}
+
+#[derive(Debug)]
+pub enum Msg {
+    /// Shows the image at the position in the gallery
+    Show(Vec<PathBuf>, usize),
+    /// To the previous or next image
+    Step(isize),
+    ToggleDetails,
+    Title(String),
+    Note(String),
+    Add(Field, String),
+    /// On the row at the position
+    Row(Field, Act, usize),
+    /// The text of the row that adds a tag, to suggest tags for
+    Typed(String),
+    Launch(Target),
+    /// Asks, then `Trashed`
+    Trash,
+    Trashed,
+}
+
+#[derive(Debug)]
+pub enum Output {
+    ShowTag(String),
+    TagsChanged,
+    Toast(String),
+    /// The image is gone
+    Trashed,
+}
+
+#[derive(Debug)]
+pub struct Decoded(PathBuf, Option<image::RgbaImage>);
+
+impl Detail {
+    fn path(&self) -> &Path {
+        self.paths.get(self.index).map_or(Path::new(""), |p| p)
+    }
+
+    fn values(&mut self, field: Field) -> &mut Vec<String> {
+        match field {
+            Field::Tags => &mut self.meta.tags,
+            Field::Urls => &mut self.meta.urls,
+        }
+    }
+
+    /// Shows the current image and its sidecar, as it is on disk now
+    fn load(&mut self, w: &Widgets, sender: &ComponentSender<Self>, page: &adw::NavigationPage) {
+        let path = self.path().to_owned();
+        let mut lib = self.lib.borrow_mut();
+        lib.refresh(&path);
+        let item = lib.get(&path);
+        self.meta = item.map(|item| item.meta.clone()).unwrap_or_default();
+        self.editable = item.is_some_and(|item| item.editable);
+        self.known = lib.tags().into_iter().map(|tag| tag.name).collect();
+        drop(lib);
+
+        let name = |p: Option<&Path>| {
+            p.and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned()
+        };
+        page.set_title(&name(Some(&path)));
+        w.folder.set_subtitle(&name(path.parent()));
+        w.path.set_subtitle(&path.to_string_lossy());
+        w.banner.set_revealed(!self.editable);
+        w.steps[0].set_sensitive(self.index > 0);
+        w.steps[1].set_sensitive(self.index + 1 < self.paths.len());
+        w.loading.set(true);
+        w.title.set_text(&self.meta.title);
+        w.note.buffer().set_text(&self.meta.note);
+        w.loading.set(false);
+        w.title.set_sensitive(self.editable);
+        w.note.set_editable(self.editable);
+        for field in [Field::Tags, Field::Urls] {
+            w.list(field).entry.set_text("");
+            w.list(field).entry.set_sensitive(self.editable);
+            self.fill(w, field, sender);
+        }
+        fill(&w.suggestions, &[], |_, tag| suggestion_row(tag, sender));
+        // By content, like the thumbnail. GTK itself needs a loader for some formats
+        sender.spawn_oneshot_command(move || {
+            let image = image::ImageReader::open(&path).and_then(|r| r.with_guessed_format());
+            Decoded(path, image.ok().and_then(|r| r.decode().ok()).map(|i| i.into_rgba8()))
+        });
+    }
+
+    fn fill(&mut self, w: &Widgets, field: Field, sender: &ComponentSender<Self>) {
+        let editable = self.editable;
+        fill(&w.list(field).rows, self.values(field), |i, value| {
+            value_row(field, i, value, editable, sender)
+        });
+    }
+
+    /// After a change to the tags or URLs
+    fn changed(&mut self, w: &Widgets, field: Field, sender: &ComponentSender<Self>) {
+        self.save(sender);
+        self.fill(w, field, sender);
+        let _ = sender.output(Output::TagsChanged);
+    }
+
+    fn save(&self, sender: &ComponentSender<Self>) {
+        if let Err(e) = self.lib.borrow_mut().save(self.path(), self.meta.clone(), &ui::now()) {
+            let _ = sender.output(Output::Toast(format!("Could not save: {e}")));
+        }
+    }
+}
+
+impl Widgets {
+    fn list(&self, field: Field) -> &List {
+        match field {
+            Field::Tags => &self.tags,
+            Field::Urls => &self.urls,
+        }
+    }
+}
+
+impl Component for Detail {
+    type Init = Lib;
+    type Input = Msg;
+    type Output = Output;
+    type CommandOutput = Decoded;
+    type Root = adw::NavigationPage;
+    type Widgets = Widgets;
+
+    fn init_root() -> adw::NavigationPage {
+        adw::NavigationPage::builder().title("Illust Viewer").build()
+    }
+
+    fn init(lib: Lib, page: adw::NavigationPage, sender: ComponentSender<Self>) -> ComponentParts<Self> {
+        let picture = gtk::Picture::builder().can_shrink(true).build();
+        let controls = gtk::Box::builder()
+            .spacing(6)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::End)
+            .css_classes(["osd", "image-controls"])
+            .build();
+        let steps = [("go-previous-symbolic", "Previous Image", -1), ("go-next-symbolic", "Next Image", 1)];
+        let steps = steps.map(|(icon, tooltip, by)| {
+            let button =
+                gtk::Button::builder().icon_name(icon).tooltip_text(tooltip).css_classes(["flat"]).build();
+            let s = sender.clone();
+            button.connect_clicked(move |_| s.input(Msg::Step(by)));
+            controls.append(&button);
+            button
+        });
+        let image = gtk::Overlay::builder().child(&picture).css_classes(["image"]).build();
+        image.add_overlay(&controls);
+
+        // The pane. Edits made by `load` are not the user's
+        let loading = Rc::<Cell<bool>>::default();
+        let pane = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(24)
+            .margin_top(24)
+            .margin_bottom(24)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        let title = adw::EntryRow::builder().title("Title").build();
+        let (s, l) = (sender.clone(), loading.clone());
+        title.connect_changed(move |title| {
+            if !l.get() {
+                s.input(Msg::Title(title.text().into()));
+            }
+        });
+        pane.append(&group("", &title));
+        let suggestions = ui::boxed_list();
+        let tags = list(&pane, "Tags", "Add Tag", Field::Tags, Some(&suggestions), &sender);
+        let s = sender.clone();
+        tags.entry.connect_changed(move |entry| s.input(Msg::Typed(entry.text().into())));
+        let urls = list(&pane, "Sources", "Add URL", Field::Urls, None, &sender);
+        let note = gtk::TextView::builder()
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .top_margin(10)
+            .bottom_margin(10)
+            .left_margin(10)
+            .right_margin(10)
+            .height_request(100)
+            .build();
+        let (s, l) = (sender.clone(), loading.clone());
+        note.buffer().connect_changed(move |note| {
+            if !l.get() {
+                s.input(Msg::Note(note.text(&note.start_iter(), &note.end_iter(), false).into()));
+            }
+        });
+        pane.append(&group("Note", &gtk::Frame::builder().child(&note).css_classes(["view"]).build()));
+        let property = |title: &str| {
+            adw::ActionRow::builder()
+                .title(title)
+                .subtitle_selectable(true)
+                .subtitle_lines(1)
+                .use_markup(false)
+                .css_classes(["property"])
+                .build()
+        };
+        let (folder, path) = (property("Folder"), property("Path"));
+        let open = gtk::Button::builder()
+            .icon_name("folder-open-symbolic")
+            .tooltip_text("Open Containing Folder")
+            .valign(gtk::Align::Center)
+            .action_name("detail.open-folder")
             .css_classes(["flat"])
             .build();
-        if let Some(target) = target {
-            button.set_action_name(Some("win.show-sibling"));
-            button.set_action_target_value(Some(target));
-        }
-        controls.append(&button);
-    }
-    let hovered = gtk::EventControllerMotion::new();
-    controls.add_controller(hovered.clone());
-    let overlay = gtk::Overlay::builder().child(picture).build();
-    overlay.add_overlay(&controls);
+        folder.add_suffix(&open);
+        let file = group("", &folder);
+        file.add(&path);
+        pane.append(&file);
+        let trash = adw::ButtonRow::builder()
+            .title("Move to Trash")
+            .start_icon_name("user-trash-symbolic")
+            .action_name("detail.trash")
+            .build();
+        // Not through the builder: that would replace the row's own `button` class
+        trash.add_css_class("destructive-action");
+        pane.append(&group("", &trash));
 
-    let fade = |to: f64, ms: u32| {
-        let c = controls.clone();
-        let target = adw::CallbackAnimationTarget::new(move |v| c.set_opacity(v));
-        adw::TimedAnimation::builder().widget(&controls).duration(ms).value_to(to).target(&target).build()
-    };
-    let (show, hide) = (fade(1.0, 200), fade(0.0, 1000));
-    let animate = move |run: &adw::TimedAnimation, stop: &adw::TimedAnimation| {
-        let from = controls.opacity();
-        if run.state() != adw::AnimationState::Playing && from != run.value_to() {
-            stop.pause();
-            run.set_value_from(from);
-            run.play();
+        // The header. Zooming is left to the image viewer
+        let menu = gio::Menu::new();
+        menu.append(Some("Open in Image Viewer"), Some("detail.open-image"));
+        menu.append(Some("Open Containing Folder"), Some("detail.open-folder"));
+        menu.append(Some("Edit Sidecar in Text Editor"), Some("detail.edit-sidecar"));
+        let actions = gio::SimpleActionGroup::new();
+        for (name, msg) in [
+            ("open-image", (|| Msg::Launch(Target::Image)) as fn() -> Msg),
+            ("open-folder", || Msg::Launch(Target::Folder)),
+            ("edit-sidecar", || Msg::Launch(Target::Sidecar)),
+            ("trash", || Msg::Trash),
+        ] {
+            let s = sender.clone();
+            ui::action(&actions, name, move || s.input(msg()));
         }
-    };
-    let timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
-    let menu = menu.downgrade();
-    let poke: Rc<dyn Fn()> = Rc::new(move || {
-        animate(&show, &hide);
-        if let Some(id) = timer.take() {
-            id.remove();
-        }
-        if hovered.contains_pointer() || menu.upgrade().is_some_and(|m| m.is_active()) {
-            return;
-        }
-        let (t, animate, show, hide) = (timer.clone(), animate.clone(), show.clone(), hide.clone());
-        *timer.borrow_mut() =
-            Some(glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
-                t.take();
-                animate(&hide, &show);
-            }));
-    });
-    // Clicks on the image show them too
-    let click = gtk::GestureClick::new();
-    let p = poke.clone();
-    click.connect_pressed(move |_, _, _, _| p());
-    overlay.add_controller(click);
-    (overlay, poke)
-}
+        page.insert_action_group("detail", Some(&actions));
+        let fullscreen = gtk::ToggleButton::builder()
+            .icon_name("view-fullscreen-symbolic")
+            .tooltip_text("Fullscreen")
+            .action_name("win.fullscreen")
+            .build();
+        let details = gtk::ToggleButton::builder()
+            .icon_name("help-about-symbolic")
+            .tooltip_text("Details")
+            .active(true)
+            .build();
+        let header = adw::HeaderBar::new();
+        header.pack_start(&fullscreen);
+        header.pack_end(&ui::menu_button(&menu));
+        header.pack_end(&details);
+        let banner = adw::Banner::new("Read-only: the sidecar is unreadable or has an unsupported version");
 
-/// The window's fullscreen toggle, as in GNOME's Image Viewer. Its icon follows the window while
-/// the page is shown
-fn fullscreen_button() -> gtk::Button {
-    let button = gtk::Button::builder()
-        .icon_name("view-fullscreen-symbolic")
-        .tooltip_text("Toggle Fullscreen")
-        .build();
-    button.connect_clicked(toggle_fullscreen);
-    let binding: Rc<RefCell<Option<glib::Binding>>> = Rc::default();
-    let b = binding.clone();
-    button.connect_map(move |button| {
-        let Some(window) = button.root().and_downcast::<gtk::Window>() else { return };
-        let icon = |_: &glib::Binding, full: bool| {
-            Some(if full { "view-restore-symbolic" } else { "view-fullscreen-symbolic" })
+        // In a narrow window the pane lies over the image, so it starts hidden
+        let split = adw::OverlaySplitView::builder()
+            .sidebar_position(gtk::PackType::End)
+            .min_sidebar_width(255.0)
+            .content(&image)
+            .sidebar(&ui::scrolled(&pane))
+            .build();
+        details.bind_property("active", &split, "show-sidebar").bidirectional().sync_create().build();
+        // RaisedBorder: no shadow over the image
+        let view = adw::ToolbarView::builder()
+            .content(&split)
+            .top_bar_style(adw::ToolbarStyle::RaisedBorder)
+            .build();
+        view.add_top_bar(&header);
+        view.add_top_bar(&banner);
+        let bin = ui::bin(&view);
+        let narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 590sp").unwrap());
+        narrow.add_setter(&split, "collapsed", Some(&true.to_value()));
+        narrow.add_setter(&split, "show-sidebar", Some(&false.to_value()));
+        bin.add_breakpoint(narrow);
+        page.set_child(Some(&bin));
+
+        // Otherwise the title field gets the focus with its text selected
+        let d = details.downgrade();
+        page.connect_shown(move |_| {
+            d.upgrade().map(|d| d.grab_focus());
+        });
+        // Escape leaves fullscreen first, and only then goes back
+        let p = page.downgrade();
+        ui::shortcut(&page, "Escape", move || {
+            match p.upgrade().and_then(|p| p.root()).and_downcast::<gtk::Window>() {
+                Some(window) if window.is_fullscreen() => {
+                    window.unfullscreen();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+
+        let model = Detail {
+            lib,
+            paths: Vec::new(),
+            index: 0,
+            meta: Meta::default(),
+            editable: false,
+            known: Vec::new(),
         };
-        b.replace(Some(
-            window
-                .bind_property("fullscreened", button, "icon-name")
-                .transform_to(icon)
-                .sync_create()
-                .build(),
-        ));
-    });
-    button.connect_unmap(move |_| {
-        if let Some(b) = binding.take() {
-            b.unbind();
+        let widgets = Widgets {
+            picture,
+            banner,
+            steps,
+            details,
+            title,
+            note,
+            tags,
+            urls,
+            suggestions,
+            folder,
+            path,
+            loading,
+        };
+        ComponentParts { model, widgets }
+    }
+
+    fn update_with_view(
+        &mut self,
+        w: &mut Widgets,
+        msg: Msg,
+        sender: ComponentSender<Self>,
+        page: &adw::NavigationPage,
+    ) {
+        let window = page.root().and_downcast::<gtk::Window>();
+        let output = sender.output_sender().clone();
+        let toast = move |text: String| output.emit(Output::Toast(text));
+        let opened = {
+            let toast = toast.clone();
+            move |result: Result<(), glib::Error>| {
+                if let Err(e) = result {
+                    toast(format!("Could not open: {}", e.message()));
+                }
+            }
+        };
+        match msg {
+            Msg::Show(paths, index) => {
+                (self.paths, self.index) = (paths, index);
+                self.load(w, &sender, page);
+            }
+            Msg::Step(by) => {
+                if let Some(index) = self.index.checked_add_signed(by).filter(|i| *i < self.paths.len()) {
+                    self.index = index;
+                    self.load(w, &sender, page);
+                }
+            }
+            Msg::ToggleDetails => w.details.set_active(!w.details.is_active()),
+            Msg::Title(title) => {
+                self.meta.title = title;
+                self.save(&sender);
+            }
+            Msg::Note(note) => {
+                self.meta.note = note;
+                self.save(&sender);
+            }
+            Msg::Add(field, value) => {
+                let value = value.trim().to_owned();
+                w.list(field).entry.set_text("");
+                if !value.is_empty() && !self.values(field).contains(&value) {
+                    self.values(field).push(value);
+                    self.changed(w, field, &sender);
+                }
+            }
+            Msg::Row(field, act, index) => {
+                let Some(value) = self.values(field).get(index).cloned() else { return };
+                match (act, field) {
+                    (Act::Remove, _) => {
+                        self.values(field).remove(index);
+                        self.changed(w, field, &sender);
+                    }
+                    (Act::Copy, _) => {
+                        page.clipboard().set_text(&value);
+                        toast("Copied".into());
+                    }
+                    (Act::Open, Field::Tags) => drop(sender.output(Output::ShowTag(value))),
+                    (Act::Open, Field::Urls) => {
+                        gtk::UriLauncher::new(&value).launch(window.as_ref(), gio::Cancellable::NONE, opened);
+                    }
+                }
+            }
+            // The most used tags that start with the text and are not on the image yet
+            Msg::Typed(text) => {
+                let text = text.trim().to_lowercase();
+                let fits = |tag: &&String| {
+                    !text.is_empty() && tag.to_lowercase().starts_with(&text) && !self.meta.tags.contains(tag)
+                };
+                let found: Vec<String> = self.known.iter().filter(fits).take(SUGGESTIONS).cloned().collect();
+                fill(&w.suggestions, &found, |_, tag| suggestion_row(tag, &sender));
+            }
+            Msg::Launch(target) => {
+                let path = self.path().to_owned();
+                let launch = |file: &Path| gtk::FileLauncher::new(Some(&gio::File::for_path(file)));
+                match target {
+                    Target::Image => launch(&path).launch(window.as_ref(), gio::Cancellable::NONE, opened),
+                    Target::Folder => {
+                        launch(&path).open_containing_folder(window.as_ref(), gio::Cancellable::NONE, opened)
+                    }
+                    Target::Sidecar => {
+                        let mut lib = self.lib.borrow_mut();
+                        if let Err(e) = lib.create(&path, &ui::now()) {
+                            toast(format!("Could not create the sidecar: {e}"));
+                        }
+                        let sidecar = lib.get(&path).map(|item| item.sidecar()).unwrap_or_default();
+                        launch(&sidecar).launch(window.as_ref(), gio::Cancellable::NONE, opened);
+                    }
+                }
+            }
+            Msg::Trash => {
+                let name = self.path().file_name().unwrap_or_default().to_string_lossy();
+                let dialog = adw::AlertDialog::new(
+                    Some("Move to Trash?"),
+                    Some(&format!("“{name}” and its sidecar will be moved to the trash.")),
+                );
+                dialog.add_responses(&[("cancel", "_Cancel"), ("trash", "_Move to Trash")]);
+                dialog.set_response_appearance("trash", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+                dialog.connect_response(Some("trash"), move |_, _| sender.input(Msg::Trashed));
+                dialog.present(Some(page));
+            }
+            // To the trash, not deleted, so that it can be undone in Files
+            Msg::Trashed => {
+                let sidecar =
+                    self.lib.borrow().get(self.path()).map(|item| item.sidecar()).unwrap_or_default();
+                let trash = |p: &Path| match p.exists() {
+                    true => gio::File::for_path(p).trash(gio::Cancellable::NONE),
+                    false => Ok(()),
+                };
+                match trash(self.path()).and_then(|_| trash(&sidecar)) {
+                    Ok(()) => toast("Moved to Trash".into()),
+                    Err(e) => toast(format!("Could not move to the trash: {}", e.message())),
+                }
+                let _ = sender.output(Output::Trashed);
+            }
         }
-    });
-    button
-}
+    }
 
-fn toggle_fullscreen(widget: &impl IsA<gtk::Widget>) {
-    if let Some(window) = widget.root().and_downcast::<gtk::Window>() {
-        window.set_fullscreened(!window.is_fullscreen());
+    fn update_cmd_with_view(
+        &mut self,
+        w: &mut Widgets,
+        Decoded(path, image): Decoded,
+        _: ComponentSender<Self>,
+        _: &adw::NavigationPage,
+    ) {
+        if path == self.path() {
+            let texture = image.map(|image| {
+                let (width, height) = (image.width() as i32, image.height() as i32);
+                let bytes = glib::Bytes::from_owned(image.into_raw());
+                gdk::MemoryTexture::new(
+                    width,
+                    height,
+                    gdk::MemoryFormat::R8g8b8a8,
+                    &bytes,
+                    width as usize * 4,
+                )
+            });
+            w.picture.set_paintable(texture.as_ref());
+        }
     }
 }
 
-/// The hamburger button used by every page (HIG: `open-menu-symbolic`, "Main Menu", F10)
-pub fn menu_button(menu: &gio::Menu) -> gtk::MenuButton {
-    gtk::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
-        .menu_model(menu)
-        .primary(true)
-        .tooltip_text("Main Menu")
-        .build()
-}
-
-/// The full image. GTK reads PNG, JPEG, and TIFF itself and the rest through gdk-pixbuf loaders,
-/// which may be missing (WebP needs webp-pixbuf-loader), so fall back to the `image` crate that
-/// made the thumbnail
-fn texture(path: &Path) -> Option<gdk::Texture> {
-    gdk::Texture::from_filename(path).ok().or_else(|| {
-        let image = image::open(path).ok()?.into_rgba8();
-        let (w, h) = image.dimensions();
-        let bytes = glib::Bytes::from_owned(image.into_raw());
-        let texture =
-            gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::R8g8b8a8, &bytes, w as usize * 4);
-        Some(texture.upcast())
-    })
-}
-
-/// Current local time in ISO 8601 with an offset, for `added`
-pub fn now() -> String {
-    glib::DateTime::now_local().and_then(|d| d.format("%FT%T%:z")).map(|s| s.to_string()).unwrap_or_default()
-}
-
-fn group(title: Option<&str>, child: &impl IsA<gtk::Widget>) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::new();
-    if let Some(title) = title {
-        group.set_title(title);
-    }
+fn group(title: &str, child: &impl IsA<gtk::Widget>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title(title).build();
     group.add(child);
     group
 }
 
-/// A boxed list with one removable row per value and a last row to add one, which suggests
-/// `known` values. The rows hold the state: the returned closure gives the values one per
-/// line, including unsubmitted input
-fn list_editor(
+/// Adds a group to the pane: the rows of a field, under them the row that adds one on Enter, and
+/// `below` that
+fn list(
+    pane: &gtk::Box,
     title: &str,
     add: &str,
-    values: Vec<&str>,
-    known: Vec<String>,
+    field: Field,
+    below: Option<&gtk::ListBox>,
+    sender: &ComponentSender<Detail>,
+) -> List {
+    let list = List { rows: ui::boxed_list(), entry: adw::EntryRow::builder().title(add).build() };
+    let s = sender.clone();
+    list.entry.connect_entry_activated(move |entry| s.input(Msg::Add(field, entry.text().into())));
+    let adder = ui::boxed_list();
+    adder.append(&list.entry);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    column.append(&list.rows);
+    column.append(&adder);
+    below.iter().for_each(|below| column.append(*below));
+    pane.append(&group(title, &column));
+    list
+}
+
+/// Shows `values` as the rows of `list`; `row` makes one from a position and a value
+fn fill(list: &gtk::ListBox, values: &[String], row: impl Fn(usize, &str) -> adw::ActionRow) {
+    list.remove_all();
+    values.iter().enumerate().for_each(|(i, value)| list.append(&row(i, value)));
+    list.set_visible(!values.is_empty());
+}
+
+/// A tag or a URL, with a menu
+fn value_row(
+    field: Field,
+    index: usize,
+    value: &str,
     editable: bool,
-    setup: fn(&adw::ActionRow, &str),
-) -> (adw::PreferencesGroup, impl Fn() -> String + use<>) {
-    let list =
-        gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
-    for value in values {
-        list.append(&value_row(value, editable, setup));
+    sender: &ComponentSender<Detail>,
+) -> adw::ActionRow {
+    // Titles are markup by default, which `&` or `<` would break
+    let row =
+        adw::ActionRow::builder().title(value).use_markup(false).title_lines(1).activatable(true).build();
+    let s = sender.clone();
+    row.connect_activated(move |_| s.input(Msg::Row(field, Act::Open, index)));
+    let actions = gio::SimpleActionGroup::new();
+    for (name, act) in [("open", Act::Open), ("copy", Act::Copy), ("remove", Act::Remove)] {
+        let s = sender.clone();
+        let action = ui::action(&actions, name, move || s.input(Msg::Row(field, act, index)));
+        action.set_enabled(editable || !matches!(act, Act::Remove));
     }
-    let entry = adw::EntryRow::builder().title(add).show_apply_button(true).sensitive(editable).build();
-    entry.connect_apply(move |entry| {
-        let text = entry.text().trim().to_owned();
-        let list = entry.parent().and_downcast::<gtk::ListBox>().unwrap();
-        if !text.is_empty() && !rows(&list).contains(&text) {
-            list.insert(&value_row(&text, editable, setup), entry.index());
-        }
-        entry.set_text("");
-    });
-    if !known.is_empty() {
-        complete(&entry, known);
+    row.insert_action_group("row", Some(&actions));
+    let (menu, last) = (gio::Menu::new(), gio::Menu::new());
+    menu.append(Some("Open"), Some("row.open"));
+    menu.append(Some("Copy"), Some("row.copy"));
+    last.append(Some("Remove"), Some("row.remove"));
+    menu.append_section(None, &last);
+    if matches!(field, Field::Urls) {
+        row.add_suffix(&gtk::Image::from_icon_name("adw-external-link-symbolic"));
     }
-    list.append(&entry);
-    let (l, e) = (list.clone(), entry.clone());
-    let text = move || [rows(&l), vec![e.text().to_string()]].concat().join("\n");
-    (group(Some(title), &list), text)
-}
-
-/// Completion that never edits the text while typing: the first `known` value that starts with
-/// the text (ignoring case, skipping values already in the list) is shown in the row's title, as
-/// "Tab: value", and Tab fills it in. Editing the text from code resets the input method, and fcitx5 answers
-/// asynchronously, so any such edit could land on a preedit that has just begun and commit it
-/// unconverted. Only Tab, pressed with no preedit shown, writes the text
-fn complete(entry: &adw::EntryRow, known: Vec<String>) {
-    let title = entry.title();
-    let found: Rc<RefCell<Option<String>>> = Rc::default();
-    let f = found.clone();
-    entry.connect_changed(move |entry| {
-        let text = entry.text().trim().to_lowercase();
-        let taken = entry.parent().and_downcast::<gtk::ListBox>().map(|l| rows(&l)).unwrap_or_default();
-        let next = (!text.is_empty())
-            .then(|| {
-                known.iter().find(|k| {
-                    k.to_lowercase().starts_with(&text) && **k != entry.text() && !taken.contains(k)
-                })
-            })
-            .flatten();
-        entry.set_title(&next.map_or(title.to_string(), |n| format!("Tab: {n}")));
-        *f.borrow_mut() = next.cloned();
-    });
-    // Whether an input method preedit is shown, on the row's inner text widget
-    let composing = Rc::new(std::cell::Cell::new(false));
-    if let Some(text) = entry.delegate().and_downcast::<gtk::Text>() {
-        let c = composing.clone();
-        text.connect_preedit_changed(move |_, preedit| c.set(!preedit.is_empty()));
-    }
-    // Tab fills in the suggestion instead of moving focus
-    let keys = gtk::EventControllerKey::new();
-    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let e = entry.downgrade();
-    keys.connect_key_pressed(move |_, key, _, _| {
-        let value = found.borrow().clone();
-        match (value, e.upgrade()) {
-            (Some(value), Some(entry)) if key == gdk::Key::Tab && !composing.get() => {
-                entry.set_text(&value);
-                entry.set_position(-1);
-                glib::Propagation::Stop
-            }
-            _ => glib::Propagation::Proceed,
-        }
-    });
-    entry.add_controller(keys);
-}
-
-fn value_row(value: &str, editable: bool, setup: fn(&adw::ActionRow, &str)) -> adw::ActionRow {
-    let row = adw::ActionRow::builder().title(value).use_markup(false).activatable(true).build();
-    setup(&row, value);
-    let remove = gtk::Button::builder()
-        .icon_name("window-close-symbolic")
-        .tooltip_text("Remove")
+    let more = gtk::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .tooltip_text("More")
         .valign(gtk::Align::Center)
-        .css_classes(["flat", "circular"])
-        .action_name("row.remove")
+        .css_classes(["flat"])
+        .menu_model(&menu)
         .build();
-    row.add_suffix(&remove);
-    add_menu(&row, value, editable);
+    row.add_suffix(&more);
     row
 }
 
-/// The row's actions and context menu. The HIG asks for a set of related items, opened by
-/// secondary click, long press, or the keyboard (Menu, Shift+F10): Open (as clicking the row),
-/// Copy (also Ctrl+C), and Remove (as the ×, disabled when read-only)
-fn add_menu(row: &adw::ActionRow, value: &str, editable: bool) {
-    let actions = gio::SimpleActionGroup::new();
-    let r = row.downgrade();
-    let open = gio::SimpleAction::new("open", None);
-    open.connect_activate(move |_, _| {
-        // As a click: the row's action (a tag's gallery) and its `activated` (a URL's browser)
-        if let Some(row) = r.upgrade() {
-            WidgetExt::activate(&row);
-        }
-    });
-    let (r, v) = (row.downgrade(), value.to_owned());
-    let copy = gio::SimpleAction::new("copy", None);
-    copy.connect_activate(move |_, _| {
-        if let Some(row) = r.upgrade() {
-            row.clipboard().set_text(&v);
-            let _ = row.activate_action("win.toast", Some(&"Copied".to_variant()));
-        }
-    });
-    let r = row.downgrade();
-    let remove = gio::SimpleAction::new("remove", None);
-    remove.set_enabled(editable);
-    // After the menu has closed. Focus then goes to the add row, since the removed row may have had it
-    remove.connect_activate(move |_, _| {
-        let Some(row) = r.upgrade() else { return };
-        glib::idle_add_local_once(move || {
-            let Some(list) = row.parent().and_downcast::<gtk::ListBox>() else { return };
-            list.remove(&row);
-            if let Some(entry) = list.last_child() {
-                entry.grab_focus();
-            }
-        });
-    });
-    for action in [open, copy, remove] {
-        actions.add_action(&action);
-    }
-    row.insert_action_group("row", Some(&actions));
-
-    let click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
-    click.connect_pressed(|gesture, _, x, y| popup_menu(gesture.widget(), Some((x, y))));
-    row.add_controller(click);
-    let press = gtk::GestureLongPress::new();
-    press.connect_pressed(|gesture, x, y| popup_menu(gesture.widget(), Some((x, y))));
-    row.add_controller(press);
-    let shortcuts = gtk::ShortcutController::new();
-    for key in ["Menu", "<Shift>F10"] {
-        let open = gtk::CallbackAction::new(|row, _| {
-            popup_menu(Some(row.clone()), None);
-            glib::Propagation::Stop
-        });
-        shortcuts.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string(key), Some(open)));
-    }
-    shortcuts.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("<Control>c"),
-        Some(gtk::NamedAction::new("row.copy")),
-    ));
-    row.add_controller(shortcuts);
-}
-
-/// Pops up a row's context menu at the pointer, or under the row when opened from the keyboard
-fn popup_menu(row: Option<gtk::Widget>, at: Option<(f64, f64)>) {
-    let Some(row) = row else { return };
-    let main = gio::Menu::new();
-    main.append(Some("Open"), Some("row.open"));
-    main.append(Some("Copy"), Some("row.copy"));
-    let remove = gio::Menu::new();
-    remove.append(Some("Remove"), Some("row.remove"));
-    let menu = gio::Menu::new();
-    menu.append_section(None, &main);
-    menu.append_section(None, &remove);
-    let popover = gtk::PopoverMenu::builder().menu_model(&menu).has_arrow(at.is_none()).build();
-    popover.set_parent(&row);
-    if let Some((x, y)) = at {
-        popover.set_halign(gtk::Align::Start);
-        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-    }
-    // Unparented once closed (after its item has run), so rows do not collect popovers
-    popover.connect_closed(|p| {
-        let p = p.clone();
-        glib::idle_add_local_once(move || p.unparent());
-    });
-    popover.popup();
-}
-
-/// The values of a list editor's rows
-fn rows(list: &gtk::ListBox) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut child = list.first_child();
-    while let Some(c) = child {
-        if let Some(row) = c.downcast_ref::<adw::ActionRow>() {
-            values.push(row.title().to_string());
-        }
-        child = c.next_sibling();
-    }
-    values
-}
-
-/// Opens `file` in its default app, or its folder in the file manager with it selected
-fn launch(window: &glib::WeakRef<gtk::Window>, file: &Path, folder: bool) {
-    let window = window.upgrade();
-    let w = window.clone();
-    let done = move |result: Result<(), glib::Error>| {
-        if let (Err(e), Some(w)) = (result, w) {
-            toast(&w, &format!("Could not open: {}", e.message()));
-        }
-    };
-    let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(file)));
-    if folder {
-        launcher.open_containing_folder(window.as_ref(), gio::Cancellable::NONE, done);
-    } else {
-        launcher.launch(window.as_ref(), gio::Cancellable::NONE, done);
-    }
-}
-
-fn toast(w: &impl IsA<gtk::Widget>, text: &str) {
-    let _ = w.activate_action("win.toast", Some(&text.to_variant()));
+/// A tag to add with a click
+fn suggestion_row(tag: &str, sender: &ComponentSender<Detail>) -> adw::ActionRow {
+    let row = adw::ActionRow::builder().title(tag).use_markup(false).activatable(true).build();
+    row.add_prefix(&gtk::Image::from_icon_name("list-add-symbolic"));
+    let (s, tag) = (sender.clone(), tag.to_owned());
+    row.connect_activated(move |_| s.input(Msg::Add(Field::Tags, tag.clone())));
+    row
 }

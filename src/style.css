@@ -1,0 +1,16 @@
+/* Tiles are at least as wide as the zoom, which is a class on the window */
+gridview.gallery { padding: 6px; background: none; }
+gridview.gallery > child { padding: 3px; }
+gridview.gallery picture { border-radius: 6px; }
+.zoom-128 gridview.gallery picture { min-width: 128px; min-height: 128px; }
+.zoom-192 gridview.gallery picture { min-width: 192px; min-height: 192px; }
+.zoom-256 gridview.gallery picture { min-width: 256px; min-height: 256px; }
+
+.tag-tile .shade { border-radius: 6px; background: linear-gradient(to bottom, transparent 40%, rgba(0, 0, 0, 0.65)); }
+.tag-tile label { color: white; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6); }
+.tag-tile .tag { font-weight: 800; font-size: 1.1em; }
+.tag-tile .count { font-size: 0.85em; opacity: 0.85; }
+
+/* The previous / next buttons show while the pointer is on the image, and fade out 3 s after */
+.image-controls { border-radius: 12px; padding: 6px; margin: 18px; opacity: 0; transition: opacity 1s 3s; }
+.image:hover .image-controls { opacity: 1; transition: opacity 200ms; }
