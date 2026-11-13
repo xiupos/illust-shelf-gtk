@@ -16,6 +16,8 @@ const SET: &str = "set:";
 /// The number of tags suggested while typing one
 pub const SUGGESTIONS: usize = 5;
 
+// MARK: - Meta
+
 /// A sidecar's content, in the illust-sidecar format: https://github.com/xiupos/illust-sidecar
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
@@ -63,6 +65,8 @@ impl Meta {
     }
 }
 
+// MARK: - Item
+
 #[derive(Clone, Debug)]
 pub struct Item {
     /// The image's path relative to the library's folder; also the item's ID. It stays the same
@@ -106,6 +110,8 @@ impl Item {
         (self.path.file_name(), &self.path)
     }
 }
+
+// MARK: - Tags
 
 /// A tag in use
 #[derive(Clone, Debug, PartialEq)]
@@ -169,6 +175,8 @@ pub fn push_unique(list: &mut Vec<String>, value: &str) -> bool {
     }
     new
 }
+
+// MARK: - Library
 
 #[derive(Default, Debug)]
 pub struct Library {
@@ -366,6 +374,8 @@ fn is_image(path: &Path) -> bool {
         .is_some_and(|e| EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
+// MARK: - Thumbnails
+
 /// A thumbnail is a center-cropped square JPEG in the cache folder, named by a hash of the
 /// image's ID
 fn thumb_path(cache: &Path, image: &Path) -> PathBuf {
@@ -407,6 +417,8 @@ fn make_thumb(image: &Path, thumb: &Path) -> io::Result<()> {
     })
 }
 
+// MARK: - Writing
+
 /// Has `write` fill a hidden temporary file next to `path` (`.<name>.tmp`, which scans skip), then
 /// renames it into place
 fn write_atomic(path: &Path, write: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
@@ -423,6 +435,8 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     let text = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
     write_atomic(path, |tmp| fs::write(tmp, text + "\n"))
 }
+
+// MARK: - Tests
 
 #[cfg(test)]
 mod tests {

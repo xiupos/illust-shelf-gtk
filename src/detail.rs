@@ -9,6 +9,8 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+// MARK: - Detail
+
 pub struct Detail {
     lib: Lib,
     /// The gallery the page was opened from, as IDs, which previous / next step through
@@ -519,6 +521,8 @@ impl Component for Detail {
         }
     }
 }
+
+// MARK: - Pane
 
 fn group(title: &str, child: &impl IsA<gtk::Widget>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title(title).build();

@@ -9,6 +9,13 @@ use std::rc::Rc;
 /// Shared by the components. The app replaces its content on reload
 pub type Lib = Rc<RefCell<Library>>;
 
+/// The local time in ISO 8601 with an offset, for `added`
+pub fn now() -> String {
+    glib::DateTime::now_local().and_then(|d| d.format("%FT%T%:z")).map(|s| s.to_string()).unwrap_or_default()
+}
+
+// MARK: - Actions
+
 /// Calls `f` on a key press that no focused widget used
 pub fn shortcut(widget: &impl IsA<gtk::Widget>, trigger: &str, f: impl Fn() -> glib::Propagation + 'static) {
     let action = gtk::CallbackAction::new(move |_, _| f());
@@ -34,6 +41,8 @@ pub fn menu_button(menu: &gio::Menu) -> gtk::MenuButton {
         .build()
 }
 
+// MARK: - Layout
+
 /// A page's content, which may shrink to the window's minimum size, and holds the page's
 /// breakpoints
 pub fn bin(content: &impl IsA<gtk::Widget>) -> adw::BreakpointBin {
@@ -43,6 +52,12 @@ pub fn bin(content: &impl IsA<gtk::Widget>) -> adw::BreakpointBin {
 pub fn boxed_list() -> gtk::ListBox {
     gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build()
 }
+
+pub fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(child).build()
+}
+
+// MARK: - Search
 
 /// A search entry in a search bar under the header, above the content. The bar opens from a
 /// header button, Ctrl+F, or typing. `search` gets the text as it changes
@@ -81,6 +96,19 @@ pub fn search_view(
     SearchView { view, entry, bar }
 }
 
+/// Fills `stack` with `content` and a "No Results" page; `show_results` picks one
+pub fn add_results(stack: &gtk::Stack, content: &impl IsA<gtk::Widget>) {
+    stack.add_named(content, Some("content"));
+    let status = adw::StatusPage::builder().icon_name("edit-find-symbolic").title("No Results").build();
+    stack.add_named(&status, Some("empty"));
+}
+
+pub fn show_results(stack: &gtk::Stack, any: bool) {
+    stack.set_visible_child_name(if any { "content" } else { "empty" });
+}
+
+// MARK: - Thumbnails
+
 /// A square thumbnail that fills its tile
 pub fn thumbnail() -> gtk::Picture {
     gtk::Picture::builder()
@@ -99,24 +127,4 @@ pub fn tile_grid(grid: &gtk::GridView) {
     // Rows as tall as a square thumbnail at the stretched width, not at the minimum
     grid.set_vscroll_policy(gtk::ScrollablePolicy::Natural);
     grid.add_css_class("gallery");
-}
-
-pub fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
-    gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(child).build()
-}
-
-/// Fills `stack` with `content` and a "No Results" page; `show_results` picks one
-pub fn add_results(stack: &gtk::Stack, content: &impl IsA<gtk::Widget>) {
-    stack.add_named(content, Some("content"));
-    let status = adw::StatusPage::builder().icon_name("edit-find-symbolic").title("No Results").build();
-    stack.add_named(&status, Some("empty"));
-}
-
-pub fn show_results(stack: &gtk::Stack, any: bool) {
-    stack.set_visible_child_name(if any { "content" } else { "empty" });
-}
-
-/// The local time in ISO 8601 with an offset, for `added`
-pub fn now() -> String {
-    glib::DateTime::now_local().and_then(|d| d.format("%FT%T%:z")).map(|s| s.to_string()).unwrap_or_default()
 }

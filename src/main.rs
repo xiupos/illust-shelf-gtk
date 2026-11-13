@@ -24,6 +24,8 @@ const APP_ID: &str = "net.xiupos.IllustShelf.Gtk";
 const ZOOMS: [u32; 3] = [128, 192, 256];
 const DEFAULT_ZOOM: u32 = 192;
 
+// MARK: - App
+
 struct App {
     config: Config,
     lib: Lib,
@@ -45,28 +47,6 @@ struct Widgets {
     loading: adw::NavigationPage,
     empty: adw::NavigationPage,
     zoom: gio::SimpleAction,
-}
-
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
-#[serde(default)]
-pub struct Config {
-    pub folder: Option<PathBuf>,
-    /// The thumbnail size in px
-    pub zoom: u32,
-}
-
-impl Config {
-    /// The defaults if the file is missing or unreadable
-    pub fn load(path: &Path) -> Self {
-        fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-    }
-
-    pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        library::write_json(path, self)
-    }
 }
 
 #[derive(Debug)]
@@ -95,6 +75,8 @@ enum Cmd {
     Added(usize, usize, Option<String>),
 }
 
+// MARK: - Adding images
+
 /// An image to add: a file to copy, or PNG data from the clipboard
 #[derive(Debug)]
 enum Source {
@@ -104,6 +86,30 @@ enum Source {
 
 fn sources(files: &gdk::FileList) -> Vec<Source> {
     files.files().iter().filter_map(|f| f.path()).map(Source::File).collect()
+}
+
+// MARK: - Settings
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(default)]
+pub struct Config {
+    pub folder: Option<PathBuf>,
+    /// The thumbnail size in px
+    pub zoom: u32,
+}
+
+impl Config {
+    /// The defaults if the file is missing or unreadable
+    pub fn load(path: &Path) -> Self {
+        fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        library::write_json(path, self)
+    }
 }
 
 fn config_path() -> PathBuf {
@@ -136,6 +142,8 @@ fn main_menu() -> gio::Menu {
     menu
 }
 
+// MARK: - Pages
+
 fn status_page(status: &adw::StatusPage, header: &adw::HeaderBar) -> adw::NavigationPage {
     let view = adw::ToolbarView::builder().content(status).build();
     view.add_top_bar(header);
@@ -166,6 +174,8 @@ fn empty_page() -> adw::NavigationPage {
     header.pack_end(&ui::menu_button(&main_menu()));
     status_page(&status, &header)
 }
+
+// MARK: - Window
 
 impl Widgets {
     fn toast(&self, text: &str) {
@@ -537,6 +547,8 @@ impl Component for App {
 fn main() {
     relm4::RelmApp::new(APP_ID).run::<App>(());
 }
+
+// MARK: - Tests
 
 #[cfg(test)]
 mod tests {

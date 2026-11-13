@@ -8,6 +8,8 @@ use relm4::prelude::*;
 use relm4::typed_view::grid::{RelmGridItem, TypedGridView};
 use std::path::PathBuf;
 
+// MARK: - Gallery
+
 pub struct Gallery {
     lib: Lib,
     tag: Option<String>,
@@ -95,6 +97,8 @@ impl Component for Gallery {
         ui::show_results(&w.stack, !self.paths.is_empty());
     }
 }
+
+// MARK: - Tags
 
 type Grid = TypedGridView<Tile, gtk::NoSelection>;
 
