@@ -126,13 +126,18 @@ pub struct Tag {
 impl Tag {
     /// The part before the first `:`, or "" if there is none
     pub fn namespace(&self) -> &str {
-        self.name.split_once(':').map_or("", |(space, _)| space)
+        split_tag(&self.name).0
     }
 
     /// The name without its namespace
     pub fn short(&self) -> &str {
-        self.name.split_once(':').map_or(&self.name, |(_, name)| name)
+        split_tag(&self.name).1
     }
+}
+
+/// A tag's namespace ("" if it has none) and its name without it
+pub fn split_tag(tag: &str) -> (&str, &str) {
+    tag.split_once(':').unwrap_or(("", tag))
 }
 
 /// The tags by namespace, for the Tags tab. `tags` is in the order of `Library::tags`, which each
@@ -299,6 +304,14 @@ impl Library {
             self.items[i].reload(&self.root);
         }
     }
+
+    /// Leaves out an image that is gone, without scanning the folder again
+    pub fn forget(&mut self, path: &Path) {
+        if let Some(i) = self.index.remove(path) {
+            self.items.remove(i);
+            self.index.values_mut().filter(|j| **j > i).for_each(|j| *j -= 1);
+        }
+    }
 }
 
 fn write(item: &mut Item, sidecar: &Path, mut meta: Meta, now: &str) -> io::Result<()> {
@@ -392,12 +405,31 @@ fn ensure_thumb(image: &Path, thumb: &Path) -> bool {
     }
 }
 
+/// Decodes an image by its content, as the extension may be wrong, with its EXIF orientation
+fn decode_oriented(path: &Path) -> io::Result<(image::DynamicImage, image::metadata::Orientation)> {
+    use image::ImageDecoder;
+    let mut decoder =
+        image::ImageReader::open(path)?.with_guessed_format()?.into_decoder().map_err(io::Error::other)?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let img = image::DynamicImage::from_decoder(decoder).map_err(io::Error::other)?;
+    Ok((img, orientation))
+}
+
+/// Decodes an image by its content, as the extension may be wrong, and turns it upright as its
+/// EXIF orientation says
+pub fn decode(path: &Path) -> io::Result<image::DynamicImage> {
+    let (mut img, orientation) = decode_oriented(path)?;
+    img.apply_orientation(orientation);
+    Ok(img)
+}
+
 fn make_thumb(image: &Path, thumb: &Path) -> io::Result<()> {
-    // By content: the extension may be wrong
-    let img = image::ImageReader::open(image)?.with_guessed_format()?.decode().map_err(io::Error::other)?;
+    let (img, orientation) = decode_oriented(image)?;
     // Small images are not enlarged
     let size = img.width().min(img.height()).min(THUMB_SIZE);
-    let square = img.resize_to_fill(size, size, image::imageops::FilterType::Triangle);
+    let mut square = img.resize_to_fill(size, size, image::imageops::FilterType::Triangle);
+    // A center-cropped square turns as the whole image would, at less cost
+    square.apply_orientation(orientation);
 
     // JPEG has no alpha: composite onto white
     let rgba = square.to_rgba8();
@@ -531,6 +563,47 @@ mod tests {
         let lib = load(&dir);
         assert_eq!(lib.paths(None, ""), [Path::new("sub/a.png")]);
         assert!(lib.thumb(Path::new("sub/a.png")).exists());
+    }
+
+    #[test]
+    fn forgets_images() {
+        let dir = tmpdir("forget");
+        for name in ["a.png", "b.png", "c.png"] {
+            png(&dir.join(name));
+        }
+        let mut lib = load(&dir);
+        lib.forget(Path::new("b.png"));
+        lib.forget(Path::new("missing.png"));
+        let mut paths = lib.paths(None, "");
+        paths.sort();
+        assert_eq!(paths, [Path::new("a.png"), Path::new("c.png")]);
+        assert!(lib.get(Path::new("b.png")).is_none() && lib.get(Path::new("c.png")).is_some());
+    }
+
+    #[test]
+    fn turns_images_upright() {
+        let dir = tmpdir("orientation");
+        // Red on the left, blue on the right, in a JPEG whose EXIF says to turn it a quarter
+        // clockwise: red is then on top
+        let img = image::RgbImage::from_fn(40, 20, |x, _| match x < 20 {
+            true => image::Rgb([255, 0, 0]),
+            false => image::Rgb([0, 0, 255]),
+        });
+        // A big-endian TIFF header and one IFD entry: Orientation (0x0112), SHORT, 6
+        let exif = b"MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0".to_vec();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            fs::File::create(dir.join("a.jpg")).unwrap(),
+            95,
+        );
+        image::ImageEncoder::set_exif_metadata(&mut encoder, exif).unwrap();
+        encoder.encode_image(&img).unwrap();
+
+        let upright = decode(&dir.join("a.jpg")).unwrap();
+        assert_eq!((upright.width(), upright.height()), (20, 40));
+        let thumb = image::open(load(&dir).thumb(Path::new("a.jpg"))).unwrap().to_rgb8();
+        let (top, bottom) = (thumb.get_pixel(10, 2), thumb.get_pixel(10, 17));
+        assert!(top[0] > 200 && top[2] < 50, "{top:?}");
+        assert!(bottom[2] > 200 && bottom[0] < 50, "{bottom:?}");
     }
 
     #[test]

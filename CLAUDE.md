@@ -23,21 +23,23 @@ Crates are renamed: `gtk` is gtk4 and `adw` is libadwaita, at the versions relm4
 - **Shared behaviour** belongs in `library.rs`, with a test, and in `spec/SPEC.md` (with cases in `spec/cases.json` where it has them). Other platforms have nothing else to go by. The components only show state and pass on what the user does.
 - Rules already in SPEC.md (IDs, sidecars, saving, order) are not repeated here. Sidecars are read into `Meta`; unknown keys go to `extra`. `added`'s time comes from the caller, which keeps the library free of glib.
 - **Scanning** (`walkdir`) follows symlinks; files are deduplicated by canonical path.
-- **Thumbnails**: named by a UUIDv5 of the image's ID, in a cache folder per library named by a UUIDv5 of its path (`main.rs`), remade when older than the image. Images that fail to decode are left out.
+- **Thumbnails**: named by a UUIDv5 of the image's ID, in a cache folder per library named by a UUIDv5 of its path (`main.rs`), remade when older than the image. Images that fail to decode are left out. `decode` turns images upright by their EXIF orientation, for thumbnails and the detail page; a thumbnail is turned after it is cropped, which costs less and gives the same square. Thumbnails made before orientation was applied are only remade when their image changes.
 - Timing: a thumbnail of a 2400×1600 JPEG takes about 18 ms on 8 cores; a cached load of 3000 images about 10 ms.
 
 ## UI
 
 - **Components** are written one way. The model holds state only; widgets live in the component's `Widgets`. The view is built in `init` with builders and small functions, not with the `view!` macro. `update_with_view` changes the state and then the widgets that show it. Lists (tag rows, suggestions, the Tags sections) are rebuilt from the state instead of being edited in place.
 - **Pages.** There are three, each built once: the top page, a tag's gallery, and the detail page. `App` alone moves between them; the components ask through their outputs. Opening a tag from the detail page replaces it with the tag's page.
-- **The library** is one `Rc<RefCell<Library>>` shared by all components. A reload replaces its content, so the components' handles stay valid. Loading runs as a command; `generation` drops the result of a load that a newer one has overtaken.
+- **The library** is one `Rc<RefCell<Library>>` shared by all components. A reload replaces its content, so the components' handles stay valid. Trashing an image only `forget`s it, without a reload. Loading runs as a command; `generation` drops the result of a load that a newer one has overtaken.
 - **Saving.** The detail page saves on every change, so nothing is pending when a page or the window closes. Filling the fields in from code also emits `changed`; `loading` tells those apart from edits.
 - **Input methods.** The app never changes the text of a field while the user types in it: that resets the input method and can commit a half-typed preedit. Tag suggestions are therefore rows to click, and the add rows are cleared only after Enter. Check changes here with an input method (below).
 - **Galleries are not refreshed** by edits, only by a search, a reload, or being shown for another tag, so they keep their scroll position. The Tags tab is refreshed when tags change.
+- **Trashing** (the detail page, Delete, or a tile's menu) ends in `App`'s `Msg::Trashed`: the galleries drop the tile in place (`Removed`) and the detail page goes back. The focus moves to the next tile: GTK would otherwise focus the first and scroll to the top. Tiles' menus open on a right click or a long press, with the path as the action's target.
 - **Grid.** `max-columns` defaults to 7. The column count follows the CSS `min-width`, which a `zoom-<px>` class on the window sets; `vscroll-policy: natural` keeps the stretched tiles square.
 - **Search bars** capture keys from the window only while mapped. Otherwise typing on the detail page opens the search of a page below it.
-- **Keys.** F9 and Left / Right for the detail page are on the window, so they work when nothing in the page has the focus. Escape is on the page, since the navigation view would handle it before the window.
+- **Keys.** F9, Left / Right, and Delete for the detail page are on the window, so they work when nothing in the page has the focus. Escape is on the page, since the navigation view would handle it before the window.
 - **Pango markup.** `adw::ActionRow` titles are markup by default; rows showing tags, URLs, or paths set `use_markup: false`.
+- **The pane** has the order of the iOS app's Info: title and note first, then tags, sources, and the file. Tag rows show the name with the namespace after it (`library::split_tag`); URL rows the site, with the URL under it. The dimensions come from the decoded image, so they are upright and appear once it is decoded.
 - **Image controls** fade with CSS alone (`:hover` and a delayed transition).
 - **Images** are decoded with the `image` crate, off the main thread: GTK needs a gdk-pixbuf loader for WebP, which is often missing. A 2400×1600 image takes 35 ms (JPEG) to 100 ms (PNG). Animated GIFs show their first frame.
 - **Pasting.** Another app's clipboard lists only MIME types, hence `union_deserialize_types()`. Ctrl+V is on the window because, with nothing focused, key events do not pass through the page.

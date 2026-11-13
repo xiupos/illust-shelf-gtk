@@ -9,7 +9,7 @@ mod library;
 mod ui;
 
 use adw::prelude::*;
-use browse::{Gallery, GalleryMsg, Open, Tags, TagsMsg, TagsOutput};
+use browse::{Gallery, GalleryMsg, GalleryOutput, Open, Tags, TagsMsg, TagsOutput};
 use detail::Detail;
 use gtk::{gdk, gio, glib};
 use library::Library;
@@ -66,6 +66,8 @@ enum Msg {
     Search(String),
     TagsChanged,
     Toast(String),
+    /// From a gallery or the detail page
+    Trashed(PathBuf, Result<(), String>),
 }
 
 #[derive(Debug)]
@@ -223,13 +225,17 @@ impl Component for App {
 
         let lib = Lib::default();
         let input = sender.input_sender();
-        let gallery = Gallery::builder().launch(lib.clone()).forward(input, Msg::ShowItem);
-        let tag_gallery = Gallery::builder().launch(lib.clone()).forward(input, Msg::ShowItem);
+        let gallery_msg = |output| match output {
+            GalleryOutput::Open(open) => Msg::ShowItem(open),
+            GalleryOutput::Trashed(path, result) => Msg::Trashed(path, result),
+        };
+        let gallery = Gallery::builder().launch(lib.clone()).forward(input, gallery_msg);
+        let tag_gallery = Gallery::builder().launch(lib.clone()).forward(input, gallery_msg);
         let detail = Detail::builder().launch(lib.clone()).forward(input, |output| match output {
             detail::Output::ShowTag(tag) => Msg::ShowTag(tag),
             detail::Output::TagsChanged => Msg::TagsChanged,
             detail::Output::Toast(text) => Msg::Toast(text),
-            detail::Output::Trashed => Msg::Reload,
+            detail::Output::Trashed(path, result) => Msg::Trashed(path, result),
         });
         let tags = Tags::builder().launch(lib.clone()).forward(input, |output| match output {
             TagsOutput::Show(tag) => Msg::ShowTag(tag),
@@ -337,11 +343,12 @@ impl Component for App {
         }
 
         // On the window, so that they work wherever the focus is. A focused text field still gets
-        // the arrow keys first
+        // the arrow keys and Delete first
         for (key, msg) in [
             ("F9", (|| detail::Msg::ToggleDetails) as fn() -> detail::Msg),
             ("Left", || detail::Msg::Step(-1)),
             ("Right", || detail::Msg::Step(1)),
+            ("Delete|KP_Delete", || detail::Msg::Trash),
         ] {
             let (n, page, d) = (nav.downgrade(), detail.widget().downgrade(), detail.sender().clone());
             ui::shortcut(&window, key, move || {
@@ -510,6 +517,24 @@ impl Component for App {
             }
             Msg::TagsChanged => self.tags.emit(TagsMsg::Refresh),
             Msg::Toast(text) => w.toast(&text),
+            // The galleries leave the image out, keeping their scroll positions; the detail page
+            // goes back to the one it was opened from
+            Msg::Trashed(path, result) => {
+                w.toast(result.as_ref().map_or_else(|e| e.as_str(), |()| "Moved to Trash"));
+                if self.lib.borrow().get(&path).is_some() {
+                    return;
+                }
+                if self.lib.borrow().is_empty() {
+                    return sender.input(Msg::Reload);
+                }
+                for gallery in [&self.gallery, &self.tag_gallery] {
+                    gallery.emit(GalleryMsg::Removed(path.clone()));
+                }
+                self.tags.emit(TagsMsg::Refresh);
+                if w.nav.visible_page().as_ref() == Some(self.detail.widget()) {
+                    w.nav.pop();
+                }
+            }
         }
     }
 

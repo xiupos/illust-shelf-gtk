@@ -38,6 +38,7 @@ Choose a folder (Ctrl+O). Its subfolders and symlinks are included; png, jpg, we
 - **Add images** with the + button, by dropping files, or with Ctrl+V. They are copied into the folder.
 - **Tags** with a namespace, like `creator:Name` or `set:Work`, are grouped in the Tags tab.
 - **Click an image** to edit its title, tags, source URLs, and note. Changes are saved at once.
+- **Move an image to the trash** with Delete, or by right-clicking its thumbnail. Its sidecar goes with it.
 
 | Key | Action |
 |---|---|
@@ -47,6 +48,7 @@ Choose a folder (Ctrl+O). Its subfolders and symlinks are included; png, jpg, we
 | Ctrl+O | Choose folder |
 | Ctrl+V | Add images from the clipboard |
 | Left / Right | Previous / next image |
+| Delete | Move the image to the trash |
 | F9 | Show or hide the details pane |
 | F11 | Fullscreen |
 | Ctrl+Q | Quit |

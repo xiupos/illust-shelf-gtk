@@ -107,6 +107,41 @@ pub fn show_results(stack: &gtk::Stack, any: bool) {
     stack.set_visible_child_name(if any { "content" } else { "empty" });
 }
 
+// MARK: - Trash
+
+/// Asks whether to move the image `name` and its sidecar to the trash, then calls `trash`
+pub fn ask_trash(parent: &impl IsA<gtk::Widget>, name: &str, trash: impl Fn() + 'static) {
+    let dialog = adw::AlertDialog::new(
+        Some("Move to Trash?"),
+        Some(&format!("“{name}” and its sidecar will be moved to the trash.")),
+    );
+    dialog.add_responses(&[("cancel", "_Cancel"), ("trash", "_Move to Trash")]);
+    dialog.set_response_appearance("trash", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.connect_response(Some("trash"), move |_, _| trash());
+    dialog.present(Some(parent));
+}
+
+/// Moves the image and its sidecar to the trash, not deleting them, so that it can be undone in
+/// Files, and leaves the image out of the library. Returns what to tell the user
+pub fn trash(lib: &mut Library, path: &std::path::Path) -> Result<(), String> {
+    // Not the folder itself, which is the file of the empty ID
+    if lib.get(path).is_none() {
+        return Err("The image is gone".into());
+    }
+    let trash = |p: &std::path::Path| match p.exists() {
+        true => gio::File::for_path(p).trash(gio::Cancellable::NONE),
+        false => Ok(()),
+    };
+    let result = trash(&lib.file(path)).and_then(|_| trash(&lib.sidecar(path)));
+    // Gone, if only the sidecar is left
+    if !lib.file(path).exists() {
+        lib.forget(path);
+    }
+    result.map_err(|e| format!("Could not move to the trash: {}", e.message()))
+}
+
 // MARK: - Thumbnails
 
 /// A square thumbnail that fills its tile

@@ -36,6 +36,11 @@ pub struct Widgets {
     suggestions: gtk::ListBox,
     folder: adw::ActionRow,
     path: adw::ActionRow,
+    /// Width × height, once the image is decoded
+    dimensions: adw::ActionRow,
+    size: adw::ActionRow,
+    modified: adw::ActionRow,
+    added: adw::ActionRow,
     /// Set while the fields are filled in from code, which is not an edit
     loading: Rc<Cell<bool>>,
 }
@@ -94,8 +99,8 @@ pub enum Output {
     ShowTag(String),
     TagsChanged,
     Toast(String),
-    /// The image is gone
-    Trashed,
+    /// The image was moved to the trash, or an error
+    Trashed(PathBuf, Result<(), String>),
 }
 
 #[derive(Debug)]
@@ -131,6 +136,20 @@ impl Detail {
         page.set_title(&name(Some(&file)));
         w.folder.set_subtitle(&name(file.parent()));
         w.path.set_subtitle(&file.to_string_lossy());
+        // Until the image is decoded
+        w.dimensions.set_visible(false);
+        let metadata = std::fs::metadata(&file).ok();
+        w.size.set_subtitle(&metadata.as_ref().map(|m| glib::format_size(m.len())).unwrap_or_default());
+        let modified = metadata.and_then(|m| m.modified().ok()).and_then(|t| {
+            let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            glib::DateTime::from_unix_local(secs as i64).ok()
+        });
+        let added = self.meta.added.as_deref().and_then(|a| glib::DateTime::from_iso8601(a, None).ok());
+        for (row, time) in [(&w.modified, modified), (&w.added, added)] {
+            let text = time.and_then(|t| t.to_local().ok()?.format("%c").ok());
+            row.set_subtitle(text.as_deref().unwrap_or_default());
+            row.set_visible(text.is_some());
+        }
         w.banner.set_revealed(!self.editable);
         w.steps[0].set_sensitive(self.index > 0);
         w.steps[1].set_sensitive(self.index + 1 < self.paths.len());
@@ -146,10 +165,9 @@ impl Detail {
             self.fill(w, field, sender);
         }
         fill(&w.suggestions, &[], |_, tag| suggestion_row(tag, sender));
-        // By content, like the thumbnail. GTK itself needs a loader for some formats
+        // Not by GTK, which needs a loader for some formats
         sender.spawn_oneshot_command(move || {
-            let image = image::ImageReader::open(&file).and_then(|r| r.with_guessed_format());
-            Decoded(path, image.ok().and_then(|r| r.decode().ok()).map(|i| i.into_rgba8()))
+            Decoded(path, library::decode(&file).ok().map(|i| i.into_rgba8()))
         });
     }
 
@@ -233,11 +251,6 @@ impl Component for Detail {
             }
         });
         pane.append(&group("", &title));
-        let suggestions = ui::boxed_list();
-        let tags = list(&pane, "Tags", "Add Tag", Field::Tags, Some(&suggestions), &sender);
-        let s = sender.clone();
-        tags.entry.connect_changed(move |entry| s.input(Msg::Typed(entry.text().into())));
-        let urls = list(&pane, "Sources", "Add URL", Field::Urls, None, &sender);
         let note = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
             .top_margin(10)
@@ -253,6 +266,11 @@ impl Component for Detail {
             }
         });
         pane.append(&group("Note", &gtk::Frame::builder().child(&note).css_classes(["view"]).build()));
+        let suggestions = ui::boxed_list();
+        let tags = list(&pane, "Tags", "Add Tag", Field::Tags, Some(&suggestions), &sender);
+        let s = sender.clone();
+        tags.entry.connect_changed(move |entry| s.input(Msg::Typed(entry.text().into())));
+        let urls = list(&pane, "Sources", "Add URL", Field::Urls, None, &sender);
         let property = |title: &str| {
             adw::ActionRow::builder()
                 .title(title)
@@ -271,8 +289,12 @@ impl Component for Detail {
             .css_classes(["flat"])
             .build();
         folder.add_suffix(&open);
-        let file = group("", &folder);
-        file.add(&path);
+        let (dimensions, size) = (property("Dimensions"), property("Size"));
+        let (modified, added) = (property("Modified"), property("Added"));
+        let file = group("File", &folder);
+        for row in [&path, &dimensions, &size, &modified, &added] {
+            file.add(row);
+        }
         pane.append(&file);
         let trash = adw::ButtonRow::builder()
             .title("Move to Trash")
@@ -374,6 +396,10 @@ impl Component for Detail {
             suggestions,
             folder,
             path,
+            dimensions,
+            size,
+            modified,
+            added,
             loading,
         };
         ComponentParts { model, widgets }
@@ -464,36 +490,12 @@ impl Component for Detail {
             }
             Msg::Trash => {
                 let name = self.path().file_name().unwrap_or_default().to_string_lossy();
-                let dialog = adw::AlertDialog::new(
-                    Some("Move to Trash?"),
-                    Some(&format!("“{name}” and its sidecar will be moved to the trash.")),
-                );
-                dialog.add_responses(&[("cancel", "_Cancel"), ("trash", "_Move to Trash")]);
-                dialog.set_response_appearance("trash", adw::ResponseAppearance::Destructive);
-                dialog.set_default_response(Some("cancel"));
-                dialog.set_close_response("cancel");
-                dialog.connect_response(Some("trash"), move |_, _| sender.input(Msg::Trashed));
-                dialog.present(Some(page));
+                ui::ask_trash(page, &name, move || sender.input(Msg::Trashed));
             }
-            // The image and its sidecar. To the trash, not deleted, so that it can be undone in
-            // Files
             Msg::Trashed => {
-                let lib = self.lib.borrow();
-                // Not the folder itself, which is the file of the empty ID
-                if lib.get(self.path()).is_none() {
-                    return;
-                }
-                let (file, sidecar) = (lib.file(self.path()), lib.sidecar(self.path()));
-                drop(lib);
-                let trash = |p: &Path| match p.exists() {
-                    true => gio::File::for_path(p).trash(gio::Cancellable::NONE),
-                    false => Ok(()),
-                };
-                match trash(&file).and_then(|_| trash(&sidecar)) {
-                    Ok(()) => toast("Moved to Trash".into()),
-                    Err(e) => toast(format!("Could not move to the trash: {}", e.message())),
-                }
-                let _ = sender.output(Output::Trashed);
+                let path = self.path().to_owned();
+                let result = ui::trash(&mut self.lib.borrow_mut(), &path);
+                let _ = sender.output(Output::Trashed(path, result));
             }
         }
     }
@@ -518,6 +520,10 @@ impl Component for Detail {
                 )
             });
             w.picture.set_paintable(texture.as_ref());
+            if let Some(texture) = &texture {
+                w.dimensions.set_subtitle(&format!("{} × {}", texture.width(), texture.height()));
+            }
+            w.dimensions.set_visible(texture.is_some());
         }
     }
 }
@@ -569,8 +575,26 @@ fn value_row(
     sender: &ComponentSender<Detail>,
 ) -> adw::ActionRow {
     // Titles are markup by default, which `&` or `<` would break
-    let row =
-        adw::ActionRow::builder().title(value).use_markup(false).title_lines(1).activatable(true).build();
+    let row = adw::ActionRow::builder().use_markup(false).title_lines(1).activatable(true).build();
+    match field {
+        // The name, with its namespace after it
+        Field::Tags => {
+            let (namespace, name) = library::split_tag(value);
+            row.set_title(name);
+            if !namespace.is_empty() {
+                row.add_suffix(&gtk::Label::builder().label(namespace).css_classes(["dim-label"]).build());
+            }
+        }
+        // The site, with the whole URL under it
+        Field::Urls => match site(value) {
+            Some(site) => {
+                row.set_title(&site);
+                row.set_subtitle(value);
+                row.set_subtitle_lines(1);
+            }
+            None => row.set_title(value),
+        },
+    }
     let s = sender.clone();
     row.connect_activated(move |_| s.input(Msg::Row(field, Act::Open, index)));
     let actions = gio::SimpleActionGroup::new();
@@ -597,6 +621,12 @@ fn value_row(
         .build();
     row.add_suffix(&more);
     row
+}
+
+/// The host of a URL, without `www.`
+fn site(url: &str) -> Option<String> {
+    let host = glib::Uri::parse(url, glib::UriFlags::NONE).ok()?.host()?;
+    Some(host.strip_prefix("www.").unwrap_or(&host).to_owned()).filter(|h| !h.is_empty())
 }
 
 /// A tag to add with a click

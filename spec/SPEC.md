@@ -88,7 +88,7 @@ Otherwise, follow the platform's conventions.
 
 ## Left to the implementation
 
-Thumbnails (the reference makes 512 px center-cropped JPEGs while loading; on devices with less memory, make them as they come into view), EXIF orientation (the reference ignores it), access to the folder, settings, opening files and URLs in other apps, and input such as keys, gestures, and drag and drop.
+Thumbnails (the reference makes 512 px center-cropped JPEGs while loading; on devices with less memory, make them as they come into view), EXIF orientation (the reference turns images upright, thumbnails too), access to the folder, settings, opening files and URLs in other apps, and input such as keys, gestures, and drag and drop.
 
 ## Test cases
 

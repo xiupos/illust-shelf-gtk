@@ -4,9 +4,13 @@
 use crate::library::{self, Tag};
 use crate::ui::{self, Lib};
 use gtk::prelude::*;
+use gtk::{gdk, gio, glib};
 use relm4::prelude::*;
 use relm4::typed_view::grid::{RelmGridItem, TypedGridView};
+use std::cell::RefCell;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 // MARK: - Gallery
 
@@ -30,6 +34,18 @@ pub enum GalleryMsg {
     Show(Option<String>),
     Search(String),
     Activated(u32),
+    /// Asks, then `Trashed`
+    Trash(PathBuf),
+    Trashed(PathBuf),
+    /// Leaves out an image that is gone, keeping the scroll position
+    Removed(PathBuf),
+}
+
+#[derive(Debug)]
+pub enum GalleryOutput {
+    Open(Open),
+    /// The image was moved to the trash, or an error
+    Trashed(PathBuf, Result<(), String>),
 }
 
 /// An image was chosen: the gallery's images, and the position of the chosen one
@@ -39,25 +55,60 @@ pub struct Open {
     pub index: usize,
 }
 
-struct Thumb(PathBuf);
+/// An image, and its thumbnail
+struct Thumb {
+    path: PathBuf,
+    thumb: PathBuf,
+}
 
 impl RelmGridItem for Thumb {
     type Root = gtk::Picture;
-    type Widgets = ();
+    /// The image shown, for the menu
+    type Widgets = Rc<RefCell<PathBuf>>;
 
-    fn setup(_: &gtk::ListItem) -> (gtk::Picture, ()) {
-        (ui::thumbnail(), ())
+    fn setup(_: &gtk::ListItem) -> (gtk::Picture, Self::Widgets) {
+        let picture = ui::thumbnail();
+        let path = Rc::<RefCell<PathBuf>>::default();
+        // A menu on a right click or a long press
+        let menu = |picture: &gtk::Picture, path: &Rc<RefCell<PathBuf>>, x: f64, y: f64| {
+            let model = gio::Menu::new();
+            let item = gio::MenuItem::new(Some("Move to Trash"), None);
+            let bytes = path.borrow().as_os_str().as_bytes().to_vec();
+            item.set_action_and_target_value(Some("gallery.trash"), Some(&bytes.to_variant()));
+            model.append_item(&item);
+            let popover = gtk::PopoverMenu::from_model(Some(&model));
+            popover.set_parent(picture);
+            popover.set_has_arrow(false);
+            popover.set_halign(gtk::Align::Start);
+            popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover.connect_closed(|p| {
+                // After the chosen item's action, which needs the popover in the tree
+                let p = p.clone();
+                glib::idle_add_local_once(move || p.unparent());
+            });
+            popover.popup();
+        };
+        let click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
+        let (p, w) = (path.clone(), picture.downgrade());
+        click.connect_pressed(move |_, _, x, y| w.upgrade().iter().for_each(|w| menu(w, &p, x, y)));
+        picture.add_controller(click);
+        let press = gtk::GestureLongPress::builder().touch_only(true).build();
+        let (p, w) = (path.clone(), picture.downgrade());
+        press.connect_pressed(move |_, x, y| w.upgrade().iter().for_each(|w| menu(w, &p, x, y)));
+        picture.add_controller(press);
+        (picture, path)
     }
 
-    fn bind(&mut self, _: &mut (), picture: &mut gtk::Picture) {
-        picture.set_filename(Some(&self.0));
+    fn bind(&mut self, path: &mut Self::Widgets, picture: &mut gtk::Picture) {
+        picture.set_filename(Some(&self.thumb));
+        *path.borrow_mut() = self.path.clone();
     }
 }
 
 impl Component for Gallery {
     type Init = Lib;
     type Input = GalleryMsg;
-    type Output = Open;
+    type Output = GalleryOutput;
     type CommandOutput = ();
     type Root = gtk::Stack;
     type Widgets = GalleryWidgets;
@@ -69,7 +120,18 @@ impl Component for Gallery {
     fn init(lib: Lib, root: gtk::Stack, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let grid = TypedGridView::new();
         ui::tile_grid(&grid.view);
-        grid.view.connect_activate(move |_, position| sender.input(GalleryMsg::Activated(position)));
+        let s = sender.clone();
+        grid.view.connect_activate(move |_, position| s.input(GalleryMsg::Activated(position)));
+        // The tiles' menus
+        let actions = gio::SimpleActionGroup::new();
+        let trash = gio::SimpleAction::new("trash", Some(glib::VariantTy::BYTE_STRING));
+        trash.connect_activate(move |_, bytes| {
+            if let Some(bytes) = bytes.and_then(|b| b.get::<Vec<u8>>()) {
+                sender.input(GalleryMsg::Trash(std::ffi::OsString::from_vec(bytes).into()));
+            }
+        });
+        actions.add_action(&trash);
+        root.insert_action_group("gallery", Some(&actions));
         ui::add_results(&root, &ui::scrolled(&grid.view));
         let model = Gallery { lib, tag: None, query: String::new(), paths: Vec::new() };
         ComponentParts { model, widgets: GalleryWidgets { stack: root, grid } }
@@ -80,20 +142,46 @@ impl Component for Gallery {
         w: &mut GalleryWidgets,
         msg: GalleryMsg,
         sender: ComponentSender<Self>,
-        _: &gtk::Stack,
+        root: &gtk::Stack,
     ) {
         match msg {
             GalleryMsg::Show(tag) => (self.tag, self.query) = (tag, String::new()),
             GalleryMsg::Search(query) => self.query = query,
             GalleryMsg::Activated(position) => {
-                let _ = sender.output(Open { paths: self.paths.clone(), index: position as usize });
+                let open = Open { paths: self.paths.clone(), index: position as usize };
+                let _ = sender.output(GalleryOutput::Open(open));
+                return;
+            }
+            GalleryMsg::Trash(path) => {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                ui::ask_trash(root, &name, move || sender.input(GalleryMsg::Trashed(path.clone())));
+                return;
+            }
+            // The app has the galleries leave it out
+            GalleryMsg::Trashed(path) => {
+                let result = ui::trash(&mut self.lib.borrow_mut(), &path);
+                let _ = sender.output(GalleryOutput::Trashed(path, result));
+                return;
+            }
+            GalleryMsg::Removed(path) => {
+                if let Some(i) = self.paths.iter().position(|p| *p == path) {
+                    self.paths.remove(i);
+                    w.grid.remove(i as u32);
+                    // The focus goes to the next tile, not the first, which would scroll to the top
+                    if let Some(next) = i.checked_sub((i == self.paths.len()) as usize) {
+                        w.grid.view.scroll_to(next as u32, gtk::ListScrollFlags::FOCUS, None);
+                    }
+                }
+                ui::show_results(&w.stack, !self.paths.is_empty());
                 return;
             }
         }
         let lib = self.lib.borrow();
         self.paths = lib.paths(self.tag.as_deref(), &self.query);
         w.grid.clear();
-        w.grid.extend_from_iter(self.paths.iter().map(|path| Thumb(lib.thumb(path))));
+        w.grid.extend_from_iter(
+            self.paths.iter().map(|path| Thumb { path: path.clone(), thumb: lib.thumb(path) }),
+        );
         ui::show_results(&w.stack, !self.paths.is_empty());
     }
 }
