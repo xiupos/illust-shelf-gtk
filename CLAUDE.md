@@ -20,16 +20,11 @@ Crates are renamed: `gtk` is gtk4 and `adw` is libadwaita, at the versions relm4
 
 ## Library
 
-- **Shared behaviour** belongs in `library.rs`, with a test, and in `spec/SPEC.md`; a rule that has cases there gets one in `spec/cases.json`. The components only show state and pass on what the user does. This app is the model for the apps on other platforms, which have nothing else to go by.
-- **IDs.** An image's ID is its path relative to the folder. `Library::file` and `Library::sidecar` give the files. Other platforms have no stable absolute paths (iOS) or none at all (Android).
-- **Sidecars** are read into `Meta`; keys it does not know are kept in `extra`. A sidecar that is missing is editable. One that does not parse as a `Meta`, or whose `v` is not the integer 1, is read-only and never written.
-- **Saving** writes the whole `Meta`, through a temporary file and a rename, and only if it differs from what was read. Changes made elsewhere since the image was opened are overwritten.
-- **Sidecar path.** `.json` is appended to the whole file name. `with_extension` would give `foo.png` and `foo.jpg` the same sidecar.
-- **Scanning** (`walkdir`) follows symlinks and stops at loops; files are deduplicated by canonical path.
-- **Thumbnails** are 512 px center-cropped JPEGs, named by a UUIDv5 of the image's ID and remade when older than the image. Each folder therefore has its own cache folder, which `main.rs` names by a UUIDv5 of the folder's path. Images that fail to decode are left out of the library. EXIF orientation is ignored.
-- **Order.** Newest mtime first, except a `set:` tag's gallery, which is in file name order.
-- `added` is set only when the app creates the sidecar. The time comes from the caller, which keeps the library free of glib.
-- Timing: a thumbnail of a 2400×1600 JPEG takes about 18 ms per image on 8 cores; a cached load of 3000 images takes about 10 ms.
+- **Shared behaviour** belongs in `library.rs`, with a test, and in `spec/SPEC.md` (with cases in `spec/cases.json` where it has them). Other platforms have nothing else to go by. The components only show state and pass on what the user does.
+- Rules already in SPEC.md (IDs, sidecars, saving, order) are not repeated here. Sidecars are read into `Meta`; unknown keys go to `extra`. `added`'s time comes from the caller, which keeps the library free of glib.
+- **Scanning** (`walkdir`) follows symlinks; files are deduplicated by canonical path.
+- **Thumbnails**: named by a UUIDv5 of the image's ID, in a cache folder per library named by a UUIDv5 of its path (`main.rs`), remade when older than the image. Images that fail to decode are left out.
+- Timing: a thumbnail of a 2400×1600 JPEG takes about 18 ms on 8 cores; a cached load of 3000 images about 10 ms.
 
 ## UI
 
@@ -53,19 +48,9 @@ Run the app on a virtual X server, so that it never touches the real screen. Nee
 
 ```bash
 Xvfb :99 -screen 0 1280x800x24 -nolisten tcp &
-```
-
-```bash
 mkdir -p /tmp/iv/config/net.xiupos.IllustShelf.Gtk /tmp/iv/cache /tmp/iv/pics
-```
-
-```bash
 echo '{"folder":"/tmp/iv/pics","zoom":192}' > /tmp/iv/config/net.xiupos.IllustShelf.Gtk/config.json
-```
-
-Put test images and sidecars in `/tmp/iv/pics`, then launch:
-
-```bash
+# put test images and sidecars in /tmp/iv/pics, then:
 dbus-run-session -- env GTK_A11Y=none DISPLAY=:99 WAYLAND_DISPLAY= GDK_BACKEND=x11 GSK_RENDERER=cairo GDK_DEBUG=no-portals XDG_CONFIG_HOME=/tmp/iv/config XDG_CACHE_HOME=/tmp/iv/cache ./target/debug/illust-shelf-gtk
 ```
 
@@ -73,15 +58,7 @@ dbus-run-session -- env GTK_A11Y=none DISPLAY=:99 WAYLAND_DISPLAY= GDK_BACKEND=x
 - `GSK_RENDERER=cairo`: Xvfb has no GPU.
 - `GDK_DEBUG=no-portals`: otherwise file dialogs open on the real display.
 
-Drive it and look at the result:
-
-```bash
-DISPLAY=:99 xdotool mousemove 300 300 click 1
-```
-
-```bash
-DISPLAY=:99 import -window root /tmp/iv/shot.png
-```
+Drive it with `DISPLAY=:99 xdotool mousemove 300 300 click 1`, and look with `DISPLAY=:99 import -window root /tmp/iv/shot.png`.
 
 Caveats:
 

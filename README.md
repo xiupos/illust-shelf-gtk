@@ -1,85 +1,43 @@
 # illust-shelf-gtk
 
-A GNOME app for browsing and organizing illustrations in a local folder, with metadata such as tags and sources.
+A GNOME app for browsing and tagging illustrations in a local folder.
 
-Metadata is stored next to each image in a sidecar JSON file: `foo.png.json` for `foo.png`. The format is [illust-sidecar](https://github.com/xiupos/illust-sidecar). Sidecars that cannot be read or have a `v` other than 1 are read-only and are never overwritten. Unknown keys are kept.
+Metadata is kept next to each image in a sidecar JSON file (`foo.png.json` for `foo.png`), in the [illust-sidecar](https://github.com/xiupos/illust-sidecar) format.
 
-## Requirements
+## Build
 
-- Rust (with edition 2024 support)
-- GTK 4.12 or later
-- libadwaita 1.6 or later
-
-Arch Linux:
+Needs Rust (edition 2024), GTK 4.12+, and libadwaita 1.6+.
 
 ```bash
+# Arch
 sudo pacman -S --needed rust gtk4 libadwaita
-```
 
-Fedora:
-
-```bash
+# Fedora
 sudo dnf install cargo gtk4-devel libadwaita-devel
-```
 
-Debian / Ubuntu (a release with libadwaita 1.6 or later):
-
-```bash
+# Debian / Ubuntu
 sudo apt install cargo libgtk-4-dev libadwaita-1-dev
 ```
 
-## Build and run
-
 ```bash
-cargo build --release
+cargo run --release
 ```
 
-```bash
-./target/release/illust-shelf-gtk
-```
-
-Tests:
+To install it with its icon and desktop entry, use [Meson](https://mesonbuild.com):
 
 ```bash
-cargo test
+meson setup build --prefix ~/.local && meson install -C build
 ```
 
-## Install
-
-Needs [Meson](https://mesonbuild.com) (`meson` in the package managers above).
-
-```bash
-meson setup build --prefix ~/.local
-```
-
-```bash
-meson install -C build
-```
-
-This builds the app and installs it with its icon and its entry in the app list. Without `--prefix` it goes to `/usr/local`. `ninja -C build uninstall` removes it again.
-
-## Data
-
-- Settings: `~/.config/net.xiupos.IllustShelf.Gtk/config.json` (the folder and thumbnail size)
-- Thumbnails: `~/.cache/net.xiupos.IllustShelf.Gtk/thumbs/`, in a folder per library (safe to delete; recreated on the next launch). Thumbnails made by earlier versions are not reused; delete the folder once to reclaim the space
+`ninja -C build uninstall` removes it again, as long as the `build` folder is kept.
 
 ## Usage
 
-**Folder.** Choose the folder with your illustrations (Ctrl+O). Subfolders are included; for illustrations stored elsewhere, put symlinks in it. png, jpg, jpeg, webp, and gif are supported. Hidden files and `*.sync-conflict-*` files are skipped. The folder is not watched: press Ctrl+R after changing its contents.
+Choose a folder (Ctrl+O). Its subfolders and symlinks are included; png, jpg, webp, and gif are shown. The folder is not watched, so press Ctrl+R after changing it.
 
-**Adding images.** Use the + button, drop files on the window, or press Ctrl+V on the main page (copied files, or copied image data, which is saved as PNG). Images are copied into the folder under a UUIDv7 name with their extension, so names sort by when they were added, each with a sidecar holding `v` and `added`.
-
-**Tags.** Creators, ratings, and works are plain tags with a namespace: `creator:Name`, `rating:5`, `age:general`, `set:Work`. The Tags tab has a row per namespace, most used tags first; scroll a row sideways, or click its heading to see its tags as a grid. Searching there filters tags by name. Galleries show the newest files first, except a `set:` tag's, which is in file name order.
-
-**Details.** Click an image to edit its title, tags, source URLs, and note. Every change is saved at once.
-
-- To add a tag or a URL, type it in the last row and press Enter. While you type a tag, the most used tags that start with it are listed below; click one to add it.
-- Clicking a tag opens its gallery, and clicking a URL opens the browser. The ⋮ button of a row has Open, Copy, and Remove.
-- The previous / next buttons (or Left / Right) step through the gallery you came from.
-- The menu (☰) opens the image in your image viewer (for zooming), its folder, or its sidecar in a text editor.
-- "Move to Trash" moves the image and its sidecar to the trash.
-
-The sidecar is read when an image is opened and rewritten on every change, so do not edit it elsewhere while its image is open.
+- **Add images** with the + button, by dropping files, or with Ctrl+V. They are copied into the folder.
+- **Tags** with a namespace, like `creator:Name` or `set:Work`, are grouped in the Tags tab.
+- **Click an image** to edit its title, tags, source URLs, and note. Changes are saved at once.
 
 | Key | Action |
 |---|---|
@@ -87,15 +45,19 @@ The sidecar is read when an image is opened and rewritten on every change, so do
 | Ctrl+R | Reload |
 | Ctrl+Plus / Ctrl+Minus / Ctrl+0 | Thumbnail size |
 | Ctrl+O | Choose folder |
-| Ctrl+V | Add images from the clipboard (main page) |
-| Left / Right | Previous / next image (detail page) |
-| F9 | Show or hide the details pane (detail page) |
-| F11 | Fullscreen (Escape leaves it) |
+| Ctrl+V | Add images from the clipboard |
+| Left / Right | Previous / next image |
+| F9 | Show or hide the details pane |
+| F11 | Fullscreen |
 | Ctrl+Q | Quit |
+
+Settings are in `~/.config/net.xiupos.IllustShelf.Gtk/`, thumbnails in `~/.cache/net.xiupos.IllustShelf.Gtk/` (safe to delete).
 
 ## Other platforms
 
-[spec/SPEC.md](spec/SPEC.md) describes the behaviour that an Illust Shelf app for another platform shares with this one, and [spec/cases.json](spec/cases.json) has test cases for it.
+- [illust-shelf-ios](https://github.com/xiupos/illust-shelf-ios): Illust Shelf for iPhone and iPad
+
+[spec/SPEC.md](spec/SPEC.md) describes the behaviour these apps share, with test cases in [spec/cases.json](spec/cases.json).
 
 ## License
 
