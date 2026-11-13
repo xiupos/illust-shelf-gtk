@@ -468,202 +468,63 @@ mod tests {
         lib.get(&id(lib, image)).unwrap().meta.clone()
     }
 
+    /// What the cases do not say: the file's form, what is kept in memory, `create`, and `refresh`
     #[test]
-    fn reads_sidecars() {
-        let dir = tmpdir("read");
-        let (empty, full) = (dir.join("empty.png"), dir.join("full.png"));
-        png(&empty);
-        png(&full);
-        write_sidecar(&empty, r#"{"v": 1}"#);
-        let text = r#"{"v": 1, "title": "夕暮れの駅前", "tags": ["風景", "creator:サンプル太郎", "rating:4"],
-            "urls": ["https://example.com/artworks/12345678"], "note": "壁紙候補",
-            "added": "2026-11-03T14:11:00+09:00"}"#;
-        write_sidecar(&full, text);
-        let lib = load(&dir);
-        assert!(lib.get(&id(&lib, &empty)).unwrap().editable && lib.get(&id(&lib, &full)).unwrap().editable);
-        assert_eq!(meta(&lib, &empty), Meta::default());
-
-        let m = meta(&lib, &full);
-        assert_eq!(m.title, "夕暮れの駅前");
-        assert_eq!(m.tags, ["風景", "creator:サンプル太郎", "rating:4"]);
-        assert_eq!(m.urls, ["https://example.com/artworks/12345678"]);
-        assert_eq!(m.note, "壁紙候補");
-        assert_eq!(m.added.as_deref(), Some("2026-11-03T14:11:00+09:00"));
-        assert!(m.extra.is_empty());
-    }
-
-    #[test]
-    fn save_normalizes_and_keeps_unknown_keys() {
+    fn saves_creates_and_refreshes() {
         let dir = tmpdir("save");
-        let p = dir.join("a.png");
+        let (p, q) = (dir.join("a.png"), dir.join("b.png"));
         png(&p);
-        write_sidecar(&p, r#"{"zzz": 1, "v": 1, "creators": [{"name": "A"}], "title": "a", "note": "n"}"#);
+        png(&q);
+        write_sidecar(&p, r#"{"v": 1, "title": "夕暮れの駅前", "added": "2020-01-01T00:00:00Z"}"#);
         let mut lib = load(&dir);
         let mut m = meta(&lib, &p);
-        m.title = "  New  ".into();
-        m.note = " \n".into();
-        m.tags = ["  b ", "", "a", "b", "\t", "a  ", "c"].map(String::from).to_vec();
-        m.urls = ["https://x/1", " https://x/1 ", "https://x/2"].map(String::from).to_vec();
+        assert_eq!((m.title.as_str(), m.added.as_deref()), ("夕暮れの駅前", Some("2020-01-01T00:00:00Z")));
+        m.tags = vec![" a ".into()];
         lib.save(&id(&lib, &p), m, NOW).unwrap();
-        // Empty fields are left out. The existing sidecar had no `added`, and saving adds none
-        let expected = json!({"v": 1, "title": "New", "tags": ["b", "a", "c"],
-            "urls": ["https://x/1", "https://x/2"], "zzz": 1, "creators": [{"name": "A"}]});
-        assert_eq!(json(&p), expected);
+        assert_eq!(meta(&lib, &p).tags, ["a"]);
         assert!(read(&p).unwrap().ends_with("}\n"));
-        assert_eq!(meta(&lib, &p).tags, ["b", "a", "c"]);
         // No temporary files left behind
         let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert!(names.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")));
-    }
-
-    #[test]
-    fn writes_only_changes_and_sets_added_on_create() {
-        let dir = tmpdir("create");
-        let (new, old, third) = (dir.join("new.png"), dir.join("old.png"), dir.join("third.png"));
-        for p in [&new, &old, &third] {
-            png(p);
-        }
-        write_sidecar(&old, r#"{"v":1,"tags":["a"],"added":"2020-01-01T00:00:00Z"}"#);
-        let mut lib = load(&dir);
-
-        // Unchanged, also after normalizing: no file is created, and an existing one is left as is
-        let m = Meta { title: "  ".into(), ..meta(&lib, &new) };
-        lib.save(&id(&lib, &new), m, NOW).unwrap();
-        assert_eq!(read(&new), None);
-        let before = read(&old).unwrap();
-        lib.save(&id(&lib, &old), meta(&lib, &old), NOW).unwrap();
-        assert_eq!(read(&old).unwrap(), before);
-
-        // Creating the sidecar records `added`; an existing `added` is kept
-        let m = Meta { title: "x".into(), ..meta(&lib, &new) };
-        lib.save(&id(&lib, &new), m, NOW).unwrap();
-        assert_eq!(json(&new), json!({"v": 1, "title": "x", "added": NOW}));
-        let m = Meta { note: "n".into(), ..meta(&lib, &old) };
-        lib.save(&id(&lib, &old), m, "later").unwrap();
-        assert_eq!(json(&old)["added"], "2020-01-01T00:00:00Z");
 
         // create() writes a sidecar only when there is none
-        lib.create(&id(&lib, &third), NOW).unwrap();
-        assert_eq!(json(&third), json!({"v": 1, "added": NOW}));
-        lib.create(&id(&lib, &old), "later").unwrap();
-        assert!(!read(&old).unwrap().contains("later"));
+        lib.create(&id(&lib, &q), NOW).unwrap();
+        assert_eq!(json(&q), json!({"v": 1, "added": NOW}));
+        lib.create(&id(&lib, &p), "later").unwrap();
+        assert!(!read(&p).unwrap().contains("later"));
+
+        // refresh() picks up a sidecar changed since the library was loaded. A newer version's
+        // content is shown, and not written
+        let text = r#"{"v":2,"title":"future"}"#;
+        write_sidecar(&q, text);
+        lib.refresh(&id(&lib, &q));
+        let m = meta(&lib, &q);
+        assert_eq!(m.title, "future");
+        assert!(lib.save(&id(&lib, &q), Meta { title: "x".into(), ..m }, NOW).is_err());
+        assert!(lib.create(&id(&lib, &q), NOW).is_err());
+        assert_eq!(read(&q).unwrap(), text);
     }
 
     #[test]
-    fn paths_and_tags() {
-        let dir = tmpdir("query");
+    fn scans_through_symlinks_and_skips_broken_images() {
+        let dir = tmpdir("scan");
         let sub = dir.join("sub");
         fs::create_dir_all(&sub).unwrap();
-        let [a, b, c, d] = [dir.join("a.png"), dir.join("b.PNG"), sub.join("c.png"), dir.join("d.png")];
-        let (a, b, c, d) = (a.as_path(), b.as_path(), c.as_path(), d.as_path());
-        for (p, t) in [(c, 500), (b, 400), (a, 300), (d, 200)] {
-            png(p);
-            let t = SystemTime::UNIX_EPOCH + Duration::from_secs(t);
-            fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
-        }
-        write_sidecar(a, r#"{"v":1,"title":"Sunset","tags":["x","y","creator:Alice","set:S"]}"#);
-        write_sidecar(b, r#"{"v":1,"note":"memo","tags":["x","x","creator:Alice","set:S"]}"#);
-        write_sidecar(c, r#"{"v":1,"tags":["creator:Bob","set:S"]}"#);
-        // Skipped
-        png(&dir.join(".hidden.png"));
-        png(&dir.join("f.sync-conflict-20260101-000000-ABC.png"));
+        png(&sub.join("a.png"));
         fs::write(dir.join("broken.png"), "not an image").unwrap();
-        fs::write(dir.join("readme.txt"), "x").unwrap();
         // A symlink back to the root does not repeat the images
         std::os::unix::fs::symlink(&dir, sub.join("loop")).unwrap();
-
         let lib = load(&dir);
-        let files = |ids: Vec<PathBuf>| ids.iter().map(|id| lib.file(id)).collect::<Vec<_>>();
-        let all = |q: &str| files(lib.paths(None, q));
-        assert_eq!(all(""), [c, b, a, d]);
-        assert!(lib.thumb(&id(&lib, a)).exists());
-        assert_eq!(all("SUN"), [a]);
-        assert_eq!(all("memo"), [b]);
-        assert_eq!(all("bob"), [c]);
-        assert!(all("nothing").is_empty());
-        assert_eq!(lib.paths(None, "")[0], Path::new("sub/c.png"));
-        assert_eq!(files(lib.paths(Some("x"), "")), [b, a]);
-        assert_eq!(files(lib.paths(Some("x"), "memo")), [b]);
-        // set: galleries are in file name order instead of newest first
-        assert_eq!(files(lib.paths(Some("set:S"), "")), [a, b, c]);
-
-        // Counted once per item. Covers are the newest image, or for set: the first by file name
-        let tag = |name: &str, count, cover: &Path| Tag { name: name.into(), count, cover: id(&lib, cover) };
-        let tags = lib.tags();
-        assert_eq!(
-            tags,
-            [
-                tag("set:S", 3, a),
-                tag("creator:Alice", 2, b),
-                tag("x", 2, b),
-                tag("creator:Bob", 1, c),
-                tag("y", 1, a)
-            ]
-        );
-        assert_eq!((tags[0].namespace(), tags[2].namespace()), ("set", ""));
-        assert_eq!((tags[0].short(), tags[2].short()), ("S", "x"));
-
-        // The Tags tab: namespaces by their most used tag, the tags without one last
-        let names = |tags: &[Tag]| tags.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
-        let sections: Vec<_> = sections(&tags).into_iter().map(|(s, tags)| (s, names(&tags))).collect();
-        let section = |space: &str, tags: &[&str]| {
-            (space.to_owned(), tags.iter().map(|t| t.to_string()).collect::<Vec<_>>())
-        };
-        assert_eq!(
-            sections,
-            [
-                section("set", &["set:S"]),
-                section("creator", &["creator:Alice", "creator:Bob"]),
-                section("", &["x", "y"])
-            ]
-        );
-        assert_eq!(names(&search_tags(&tags, " ALI ")), ["creator:Alice"]);
-        assert_eq!(search_tags(&tags, "").len(), 5);
+        assert_eq!(lib.paths(None, ""), [Path::new("sub/a.png")]);
+        assert!(lib.thumb(Path::new("sub/a.png")).exists());
     }
 
     #[test]
-    fn suggests_and_adds_tags() {
-        let list = |tags: &[&str]| tags.iter().map(|t| t.to_string()).collect::<Vec<_>>();
-        let known = list(&["creator:Alice", "cat", "Cb", "cc", "cd", "ce", "cf", "dog"]);
-        assert_eq!(suggest(&known, &list(&["cat"]), " C"), ["creator:Alice", "Cb", "cc", "cd", "ce"]);
-        assert_eq!(suggest(&known, &[], "og"), [""; 0]);
-        assert_eq!(suggest(&known, &[], "  "), [""; 0]);
-
-        let mut tags = list(&["a"]);
+    fn adds_tags() {
+        let mut tags = vec!["a".to_owned()];
         assert!(push_unique(&mut tags, " b "));
         assert!(!push_unique(&mut tags, "a ") && !push_unique(&mut tags, " "));
         assert_eq!(tags, ["a", "b"]);
-    }
-
-    #[test]
-    fn read_only_sidecars_are_never_written() {
-        let dir = tmpdir("readonly");
-        let cases =
-            [("broken", "{broken"), ("future", r#"{"v":2,"title":"future"}"#), ("float", r#"{"v":1.0}"#)];
-        let cases = cases.map(|(name, text)| (dir.join(format!("{name}.png")), text));
-        for (p, text) in &cases {
-            png(p);
-            write_sidecar(p, text);
-        }
-        let mut lib = load(&dir);
-        for (p, text) in &cases {
-            assert!(!lib.get(&id(&lib, p)).unwrap().editable);
-            let m = Meta { title: "x".into(), ..meta(&lib, p) };
-            assert!(lib.save(&id(&lib, p), m, NOW).is_err());
-            assert!(lib.create(&id(&lib, p), NOW).is_err());
-            assert_eq!(read(p).unwrap(), *text);
-        }
-        // A newer version's content is still shown
-        assert_eq!(meta(&lib, &cases[1].0).title, "future");
-
-        // refresh() picks up a sidecar broken since the library was loaded
-        let fine = dir.join("fine.png");
-        png(&fine);
-        let mut lib = load(&dir);
-        write_sidecar(&fine, "{oops");
-        lib.refresh(&id(&lib, &fine));
-        assert!(lib.save(&id(&lib, &fine), Meta { title: "x".into(), ..Meta::default() }, NOW).is_err());
-        assert_eq!(read(&fine).unwrap(), "{oops");
     }
 
     #[test]
