@@ -140,7 +140,7 @@ pub fn split_tag(tag: &str) -> (&str, &str) {
     tag.split_once(':').unwrap_or(("", tag))
 }
 
-/// The tags by namespace, for the Tags tab. `tags` is in the order of `Library::tags`, which each
+/// The tags by namespace, for the search. `tags` is in the order of `Library::tags`, which each
 /// group keeps. Namespaces are in the order of their most used tag; the tags without one ("")
 /// come last
 pub fn sections(tags: &[Tag]) -> Vec<(String, Vec<Tag>)> {

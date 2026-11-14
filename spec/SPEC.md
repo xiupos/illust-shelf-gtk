@@ -80,7 +80,7 @@ An image is removed together with its sidecar, after the user confirms. Where th
 
 Three screens, each of which exists once:
 
-1. **Top**: all images, and the tags by section, with a search for each.
+1. **Top**: all images, and a search. Before anything is typed, the search shows the tags by section; then the tags and the images that match.
 2. **A tag's gallery**, with a search.
 3. **An image**: the image, previous / next through the gallery it was opened from, and its title, tags, URLs, and note to edit. Choosing a tag here opens that tag's gallery in place of this screen.
 

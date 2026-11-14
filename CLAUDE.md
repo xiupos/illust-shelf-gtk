@@ -9,7 +9,7 @@ The UI is built with [Relm4](https://relm4.org) components, which talk through m
 | File | Contents |
 |---|---|
 | `src/main.rs` | The window (`App`): pages and navigation, zoom, loading, adding images. Also the settings file |
-| `src/browse.rs` | `Gallery`, a grid of thumbnails, and `Tags`, the Tags tab |
+| `src/browse.rs` | `Gallery`, a grid of thumbnails, and `Search`, the top page's search: the tags by section, then the tags and images that match |
 | `src/detail.rs` | `Detail`: one image and the pane that edits its sidecar |
 | `src/ui.rs`, `src/style.css` | Shared widgets, and the CSS |
 | `src/library.rs` | The images of a folder and their sidecars: scanning, thumbnails, filtering, saving, importing, and the rules for tags (sections, search, suggestions). No GTK. Has the tests |
@@ -28,15 +28,16 @@ Crates are renamed: `gtk` is gtk4 and `adw` is libadwaita, at the versions relm4
 
 ## UI
 
-- **Components** are written one way. The model holds state only; widgets live in the component's `Widgets`. The view is built in `init` with builders and small functions, not with the `view!` macro. `update_with_view` changes the state and then the widgets that show it. Lists (tag rows, suggestions, the Tags sections) are rebuilt from the state instead of being edited in place.
+- **Components** are written one way. The model holds state only; widgets live in the component's `Widgets`. The view is built in `init` with builders and small functions, not with the `view!` macro. `update_with_view` changes the state and then the widgets that show it. Lists (tag rows, suggestions, the search's sections) are rebuilt from the state instead of being edited in place.
 - **Pages.** There are three, each built once: the top page, a tag's gallery, and the detail page. `App` alone moves between them; the components ask through their outputs. Opening a tag from the detail page replaces it with the tag's page.
 - **The library** is one `Rc<RefCell<Library>>` shared by all components. A reload replaces its content, so the components' handles stay valid. Trashing an image only `forget`s it, without a reload. Loading runs as a command; `generation` drops the result of a load that a newer one has overtaken.
 - **Saving.** The detail page saves on every change, so nothing is pending when a page or the window closes. Filling the fields in from code also emits `changed`; `loading` tells those apart from edits.
 - **Input methods.** The app never changes the text of a field while the user types in it: that resets the input method and can commit a half-typed preedit. Tag suggestions are therefore rows to click, and the add rows are cleared only after Enter. Check changes here with an input method (below).
-- **Galleries are not refreshed** by edits, only by a search, a reload, or being shown for another tag, so they keep their scroll position. The Tags tab is refreshed when tags change.
+- **The top page** has two tabs, as on iOS: Library (all images, never searched, so it keeps its place) and Search, whose entry is always shown. Search shows the tags by section until something is typed, then the tags and the images that match, in a gallery of its own. Escape empties the search, back to the tags, and takes the focus out of the entry, but does not leave the tab: with a search bar that closed on Escape, the tags were a passing state that one key threw away. Ctrl+F goes to the Search tab; it is on the window, as Ctrl+V is, so that it works with nothing focused. Typing on Library does not search: that needed the entry, hidden on its tab, to capture keys and take the focus. The tags are refreshed when tags change. A tag matches exactly when the images with it do, so the results need only the gallery's "No Results".
+- **Galleries are not refreshed** by edits, only by a search, a reload, or being shown for another tag, so they keep their scroll position.
 - **Trashing** (the detail page, Delete, or a tile's menu) ends in `App`'s `Msg::Trashed`: the galleries drop the tile in place (`Removed`) and the detail page goes back. The focus moves to the next tile: GTK would otherwise focus the first and scroll to the top. Tiles' menus open on a right click or a long press, with the path as the action's target.
 - **Grid.** `max-columns` defaults to 7. The column count follows the CSS `min-width`, which a `zoom-<px>` class on the window sets; `vscroll-policy: natural` keeps the stretched tiles square.
-- **Search bars** capture keys from the window only while mapped. Otherwise typing on the detail page opens the search of a page below it.
+- **Search bars** (a tag's page) capture keys from the window only while mapped. Otherwise typing on the detail page opens the search of a page below it.
 - **Keys.** F9, Left / Right, and Delete for the detail page are on the window, so they work when nothing in the page has the focus. Escape is on the page, since the navigation view would handle it before the window.
 - **Pango markup.** `adw::ActionRow` titles are markup by default; rows showing tags, URLs, or paths set `use_markup: false`.
 - **The pane** has the order of the iOS app's Info: title and note first, then tags, sources, and the file. Tag rows show the name with the namespace after it (`library::split_tag`); URL rows the site, with the URL under it. The dimensions come from the decoded image, so they are upright and appear once it is decoded.

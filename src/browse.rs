@@ -1,5 +1,6 @@
 //! The lists of the top page: a gallery of thumbnails (also used for one tag's images), and the
-//! Tags tab, with a row of tags per namespace or a grid of the tags that match a search.
+//! search, which shows the tags by namespace until something is typed, then the tags and the
+//! images that match.
 
 use crate::library::{self, Tag};
 use crate::ui::{self, Lib};
@@ -186,11 +187,13 @@ impl Component for Gallery {
     }
 }
 
-// MARK: - Tags
+// MARK: - Search
 
 type Grid = TypedGridView<Tile, gtk::NoSelection>;
 
-pub struct Tags {
+/// The top page's search. Until something is typed, the tags by namespace, to browse; then the
+/// tags and the images that match
+pub struct Search {
     lib: Lib,
     tags: Vec<Tag>,
     query: String,
@@ -198,34 +201,38 @@ pub struct Tags {
     sections: Vec<(String, Vec<Tag>)>,
     /// The tags that match the search
     found: Vec<Tag>,
+    gallery: Controller<Gallery>,
 }
 
-pub struct TagsWidgets {
-    /// The sections, or the search
+pub struct SearchWidgets {
+    /// "tags", "none" when there are no tags, or "results"
     stack: gtk::Stack,
     sections: gtk::Box,
     /// A row of tiles per section
     rows: Vec<Grid>,
+    /// The tags that match, in a row above the images
     found: Grid,
-    /// `found`, or "No Results"
-    results: gtk::Stack,
+    found_row: gtk::ScrolledWindow,
 }
 
 #[derive(Debug)]
-pub enum TagsMsg {
+pub enum SearchMsg {
     /// Reads the tags again
     Refresh,
     Search(String),
-    /// A tile of a section, or of the search
+    /// Leaves out an image that is gone
+    Removed(PathBuf),
+    /// A tile of a section, or of the tags found
     Activated(Option<usize>, u32),
 }
 
 #[derive(Debug)]
-pub enum TagsOutput {
+pub enum SearchOutput {
     /// Opens the tag's gallery
-    Show(String),
+    ShowTag(String),
     /// Searches for the text
     Search(String),
+    Gallery(GalleryOutput),
 }
 
 /// A tag's cover image under a dark gradient, with its name and count
@@ -294,19 +301,26 @@ impl RelmGridItem for Tile {
     }
 }
 
-/// A grid of tag tiles. `section` is its position among the sections, or `None` for the search
-fn grid(section: Option<usize>, sender: &ComponentSender<Tags>) -> Grid {
+/// Tag tiles in one scrolling row. `section` is its position among the sections, or `None` for
+/// the tags found
+fn shelf(section: Option<usize>, sender: &ComponentSender<Search>) -> (Grid, gtk::ScrolledWindow) {
     let grid = Grid::new();
     grid.view.set_single_click_activate(true);
     grid.view.add_css_class("gallery");
+    grid.view.set_orientation(gtk::Orientation::Horizontal);
+    grid.view.set_max_columns(1);
     let s = sender.clone();
-    grid.view.connect_activate(move |_, position| s.input(TagsMsg::Activated(section, position)));
-    grid
+    grid.view.connect_activate(move |_, position| s.input(SearchMsg::Activated(section, position)));
+    let row = gtk::ScrolledWindow::builder()
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(false)
+        .child(&grid.view)
+        .build();
+    (grid, row)
 }
 
-/// A namespace ("" for the tags without one): a heading that searches for its tags, and all of
-/// them in one scrolling row
-fn section(space: &str, grid: &Grid, sender: &ComponentSender<Tags>) -> gtk::Box {
+/// A namespace ("" for the tags without one): a heading that searches for its tags, and its row
+fn section(space: &str, row: &gtk::ScrolledWindow, sender: &ComponentSender<Search>) -> gtk::Box {
     // "Creator" for `creator`
     let mut chars = space.chars();
     let title: String = match chars.next() {
@@ -328,25 +342,21 @@ fn section(space: &str, grid: &Grid, sender: &ComponentSender<Tags>) -> gtk::Box
     } else {
         content.append(&gtk::Image::from_icon_name("go-next-symbolic"));
         let (s, prefix) = (sender.clone(), format!("{space}:"));
-        heading.connect_clicked(move |_| s.output(TagsOutput::Search(prefix.clone())).unwrap());
+        heading.connect_clicked(move |_| s.output(SearchOutput::Search(prefix.clone())).unwrap());
     }
-    grid.view.set_orientation(gtk::Orientation::Horizontal);
-    grid.view.set_max_columns(1);
-    let row =
-        gtk::ScrolledWindow::builder().vscrollbar_policy(gtk::PolicyType::Never).child(&grid.view).build();
     let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
     section.append(&heading);
-    section.append(&row);
+    section.append(row);
     section
 }
 
-impl Component for Tags {
+impl Component for Search {
     type Init = Lib;
-    type Input = TagsMsg;
-    type Output = TagsOutput;
+    type Input = SearchMsg;
+    type Output = SearchOutput;
     type CommandOutput = ();
     type Root = gtk::Stack;
-    type Widgets = TagsWidgets;
+    type Widgets = SearchWidgets;
 
     fn init_root() -> gtk::Stack {
         gtk::Stack::new()
@@ -354,26 +364,43 @@ impl Component for Tags {
 
     fn init(lib: Lib, stack: gtk::Stack, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let sections = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_bottom(12).build();
-        stack.add_named(&ui::scrolled(&sections), Some("sections"));
-        let found = grid(None, &sender);
-        ui::tile_grid(&found.view);
-        let results = gtk::Stack::new();
-        ui::add_results(&results, &ui::scrolled(&found.view));
-        stack.add_named(&results, Some("search"));
-        let model =
-            Tags { lib, tags: Vec::new(), query: String::new(), sections: Vec::new(), found: Vec::new() };
-        ComponentParts { model, widgets: TagsWidgets { stack, sections, rows: Vec::new(), found, results } }
+        stack.add_named(&ui::scrolled(&sections), Some("tags"));
+        let none = adw::StatusPage::builder()
+            .icon_name("user-bookmarks-symbolic")
+            .title("No Tags")
+            .description("Tags you add to illustrations appear here.")
+            .build();
+        stack.add_named(&none, Some("none"));
+        let gallery =
+            Gallery::builder().launch(lib.clone()).forward(sender.output_sender(), SearchOutput::Gallery);
+        let (found, found_row) = shelf(None, &sender);
+        let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        results.append(&found_row);
+        results.append(gallery.widget());
+        stack.add_named(&results, Some("results"));
+        let model = Search {
+            lib,
+            tags: Vec::new(),
+            query: String::new(),
+            sections: Vec::new(),
+            found: Vec::new(),
+            gallery,
+        };
+        ComponentParts {
+            model,
+            widgets: SearchWidgets { stack, sections, rows: Vec::new(), found, found_row },
+        }
     }
 
     fn update_with_view(
         &mut self,
-        w: &mut TagsWidgets,
-        msg: TagsMsg,
+        w: &mut SearchWidgets,
+        msg: SearchMsg,
         sender: ComponentSender<Self>,
         _: &gtk::Stack,
     ) {
         match msg {
-            TagsMsg::Refresh => {
+            SearchMsg::Refresh => {
                 self.tags = self.lib.borrow().tags();
                 self.sections = library::sections(&self.tags);
                 while let Some(child) = w.sections.first_child() {
@@ -381,25 +408,41 @@ impl Component for Tags {
                 }
                 w.rows.clear();
                 for (i, (space, tags)) in self.sections.iter().enumerate() {
-                    let mut grid = grid(Some(i), &sender);
+                    let (mut grid, row) = shelf(Some(i), &sender);
                     grid.extend_from_iter(tags.iter().map(|tag| Tile::new(&self.lib, tag, true)));
-                    w.sections.append(&section(space, &grid, &sender));
+                    w.sections.append(&section(space, &row, &sender));
                     w.rows.push(grid);
                 }
+                self.found = library::search_tags(&self.tags, &self.query);
             }
-            TagsMsg::Search(query) => self.query = query.trim().to_owned(),
-            TagsMsg::Activated(section, position) => {
+            SearchMsg::Search(query) => {
+                self.query = query.trim().to_owned();
+                self.found = library::search_tags(&self.tags, &self.query);
+                // The images of the tags found match too, so the gallery says when nothing does
+                if !self.query.is_empty() {
+                    self.gallery.emit(GalleryMsg::Search(query));
+                }
+            }
+            SearchMsg::Removed(path) => {
+                self.gallery.emit(GalleryMsg::Removed(path));
+                return;
+            }
+            SearchMsg::Activated(section, position) => {
                 let tags = section.map_or(Some(&self.found), |i| self.sections.get(i).map(|(_, tags)| tags));
                 if let Some(tag) = tags.and_then(|tags| tags.get(position as usize)) {
-                    sender.output(TagsOutput::Show(tag.name.clone())).unwrap();
+                    sender.output(SearchOutput::ShowTag(tag.name.clone())).unwrap();
                 }
                 return;
             }
         }
-        self.found = library::search_tags(&self.tags, &self.query);
         w.found.clear();
         w.found.extend_from_iter(self.found.iter().map(|tag| Tile::new(&self.lib, tag, false)));
-        w.stack.set_visible_child_name(if self.query.is_empty() { "sections" } else { "search" });
-        ui::show_results(&w.results, !self.found.is_empty());
+        w.found_row.set_visible(!self.found.is_empty());
+        let page = match (self.query.is_empty(), self.tags.is_empty()) {
+            (false, _) => "results",
+            (true, false) => "tags",
+            (true, true) => "none",
+        };
+        w.stack.set_visible_child_name(page);
     }
 }

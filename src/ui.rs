@@ -63,7 +63,6 @@ pub fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 /// header button, Ctrl+F, or typing. `search` gets the text as it changes
 pub struct SearchView {
     pub view: adw::ToolbarView,
-    pub entry: gtk::SearchEntry,
     pub bar: gtk::SearchBar,
 }
 
@@ -93,7 +92,7 @@ pub fn search_view(
         b.upgrade().iter().for_each(|b| b.set_search_mode(!b.is_search_mode()));
         glib::Propagation::Stop
     });
-    SearchView { view, entry, bar }
+    SearchView { view, bar }
 }
 
 /// Fills `stack` with `content` and a "No Results" page; `show_results` picks one

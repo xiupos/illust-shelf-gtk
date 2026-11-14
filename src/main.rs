@@ -1,7 +1,7 @@
 //! The window: the pages and the moves between them, settings, zoom, loading, and adding images.
 //!
-//! The pages are fixed: the top page (Illustrations and Tags), one tag's gallery, and one image's
-//! details. Each exists once and is shown with new content.
+//! The pages are fixed: the top page (all images, and the search), one tag's gallery, and one
+//! image's details. Each exists once and is shown with new content.
 
 mod browse;
 mod detail;
@@ -9,7 +9,7 @@ mod library;
 mod ui;
 
 use adw::prelude::*;
-use browse::{Gallery, GalleryMsg, GalleryOutput, Open, Tags, TagsMsg, TagsOutput};
+use browse::{Gallery, GalleryMsg, GalleryOutput, Open, Search, SearchMsg, SearchOutput};
 use detail::Detail;
 use gtk::{gdk, gio, glib};
 use library::Library;
@@ -31,8 +31,9 @@ struct App {
     lib: Lib,
     /// Counts the reloads: a load that is not the latest is dropped
     generation: u32,
+    /// All images, never searched, so that it keeps its scroll position
     gallery: Controller<Gallery>,
-    tags: Controller<Tags>,
+    search: Controller<Search>,
     tag_gallery: Controller<Gallery>,
     detail: Controller<Detail>,
 }
@@ -41,7 +42,9 @@ struct Widgets {
     nav: adw::NavigationView,
     toasts: adw::ToastOverlay,
     top: adw::NavigationPage,
-    top_search: ui::SearchView,
+    tabs: adw::ViewStack,
+    /// The search, on its tab
+    entry: gtk::SearchEntry,
     tag: adw::NavigationPage,
     tag_search: ui::SearchView,
     loading: adw::NavigationPage,
@@ -62,7 +65,9 @@ enum Msg {
     ZoomStep(Option<isize>),
     ShowTag(String),
     ShowItem(Open),
-    /// Searches the top page
+    /// Goes to the search
+    Find,
+    /// Searches for the text
     Search(String),
     TagsChanged,
     Toast(String),
@@ -237,17 +242,48 @@ impl Component for App {
             detail::Output::Toast(text) => Msg::Toast(text),
             detail::Output::Trashed(path, result) => Msg::Trashed(path, result),
         });
-        let tags = Tags::builder().launch(lib.clone()).forward(input, |output| match output {
-            TagsOutput::Show(tag) => Msg::ShowTag(tag),
-            TagsOutput::Search(query) => Msg::Search(query),
+        let search = Search::builder().launch(lib.clone()).forward(input, move |output| match output {
+            SearchOutput::ShowTag(tag) => Msg::ShowTag(tag),
+            SearchOutput::Search(query) => Msg::Search(query),
+            SearchOutput::Gallery(output) => gallery_msg(output),
         });
 
-        // The top page. In a narrow window the view switcher moves to a bottom bar
-        let stack = adw::ViewStack::new();
-        stack.add_titled_with_icon(gallery.widget(), None, "Illustrations", "image-x-generic-symbolic");
-        stack.add_titled_with_icon(tags.widget(), None, "Tags", "user-bookmarks-symbolic");
+        // The top page: all images, and the search, with the tags to browse until something is
+        // typed. In a narrow window the view switcher moves to a bottom bar
+        let entry = gtk::SearchEntry::builder()
+            .placeholder_text("Search Titles, Notes, and Tags")
+            .margin_top(12)
+            .margin_bottom(6)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        let s = search.sender().clone();
+        entry.connect_search_changed(move |entry| s.emit(SearchMsg::Search(entry.text().into())));
+        // Escape empties the search, back to the tags: in the entry, which it also leaves, or
+        // anywhere on the tab
+        entry.connect_stop_search(|entry| {
+            entry.set_text("");
+            if let Some(root) = entry.root() {
+                root.set_focus(gtk::Widget::NONE);
+            }
+        });
+        let search_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        search_page.append(&adw::Clamp::builder().maximum_size(400).child(&entry).build());
+        search.widget().set_vexpand(true);
+        search_page.append(search.widget());
+        let e = entry.downgrade();
+        ui::shortcut(&search_page, "Escape", move || match e.upgrade() {
+            Some(e) if !e.text().is_empty() => {
+                e.set_text("");
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        });
+        let tabs = adw::ViewStack::new();
+        tabs.add_titled_with_icon(gallery.widget(), Some("library"), "Library", "image-x-generic-symbolic");
+        tabs.add_titled_with_icon(&search_page, Some("search"), "Search", "system-search-symbolic");
         let switcher =
-            adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
+            adw::ViewSwitcher::builder().stack(&tabs).policy(adw::ViewSwitcherPolicy::Wide).build();
         let header = adw::HeaderBar::builder().title_widget(&switcher).build();
         let add = gtk::Button::builder()
             .icon_name("list-add-symbolic")
@@ -256,17 +292,14 @@ impl Component for App {
             .build();
         header.pack_start(&add);
         header.pack_end(&ui::menu_button(&main_menu()));
-        let (g, t) = (gallery.sender().clone(), tags.sender().clone());
-        let top_search = ui::search_view(&header, &stack, move |query| {
-            g.emit(GalleryMsg::Search(query.clone()));
-            t.emit(TagsMsg::Search(query));
-        });
-        let bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
-        top_search.view.add_bottom_bar(&bar);
+        let bar = adw::ViewSwitcherBar::builder().stack(&tabs).build();
+        let view = adw::ToolbarView::builder().content(&tabs).build();
+        view.add_top_bar(&header);
+        view.add_bottom_bar(&bar);
+        let bin = ui::bin(&view);
         let narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 550sp").unwrap());
         narrow.add_setter(&bar, "reveal", Some(&true.to_value()));
         narrow.add_setter(&switcher, "visible", Some(&false.to_value()));
-        let bin = ui::bin(&top_search.view);
         bin.add_breakpoint(narrow);
         let top = adw::NavigationPage::new(&bin, "Illust Shelf");
 
@@ -360,17 +393,19 @@ impl Component for App {
             });
         }
 
-        // Adding images: Ctrl+V on the top page, and files dropped on the window. The shortcut is
-        // on the window so that it works with nothing focused; a focused text field still pastes
-        // text
-        let (s, n, t) = (sender.clone(), nav.downgrade(), top.downgrade());
-        ui::shortcut(&window, "<Control>v", move || {
-            if n.upgrade().and_then(|n| n.visible_page()) != t.upgrade() {
-                return glib::Propagation::Proceed;
-            }
-            s.input(Msg::Paste);
-            glib::Propagation::Stop
-        });
+        // Ctrl+V adds images, and Ctrl+F goes to the Search tab, on the top page. They are on the
+        // window so that they work with nothing focused; a focused text field still pastes text.
+        // Files dropped on the window are added too
+        for (trigger, msg) in [("<Control>v", (|| Msg::Paste) as fn() -> Msg), ("<Control>f", || Msg::Find)] {
+            let (s, n, t) = (sender.clone(), nav.downgrade(), top.downgrade());
+            ui::shortcut(&window, trigger, move || {
+                if n.upgrade().and_then(|n| n.visible_page()) != t.upgrade() {
+                    return glib::Propagation::Proceed;
+                }
+                s.input(msg());
+                glib::Propagation::Stop
+            });
+        }
         let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
         let s = sender.clone();
         drop.connect_drop(move |_, value, _, _| {
@@ -380,9 +415,9 @@ impl Component for App {
         });
         window.add_controller(drop);
 
-        let model = App { config, lib, generation: 0, gallery, tags, tag_gallery, detail };
+        let model = App { config, lib, generation: 0, gallery, search, tag_gallery, detail };
         let (loading, empty) = (loading_page(), empty_page());
-        let widgets = Widgets { nav, toasts, top, top_search, tag, tag_search, loading, empty, zoom };
+        let widgets = Widgets { nav, toasts, top, tabs, entry, tag, tag_search, loading, empty, zoom };
         sender.input(Msg::Reload);
         ComponentParts { model, widgets }
     }
@@ -510,12 +545,18 @@ impl Component for App {
                 self.detail.emit(detail::Msg::Show(open.paths, open.index));
                 w.nav.push(self.detail.widget());
             }
-            Msg::Search(query) => {
-                w.top_search.bar.set_search_mode(true);
-                w.top_search.entry.set_text(&query);
-                w.top_search.entry.set_position(-1);
+            Msg::Find => {
+                w.tabs.set_visible_child_name("search");
+                w.entry.grab_focus();
             }
-            Msg::TagsChanged => self.tags.emit(TagsMsg::Refresh),
+            Msg::Search(query) => {
+                w.tabs.set_visible_child_name("search");
+                w.entry.set_text(&query);
+                // So that typing goes on from the text
+                w.entry.grab_focus();
+                w.entry.set_position(-1);
+            }
+            Msg::TagsChanged => self.search.emit(SearchMsg::Refresh),
             Msg::Toast(text) => w.toast(&text),
             // The galleries leave the image out, keeping their scroll positions; the detail page
             // goes back to the one it was opened from
@@ -530,7 +571,8 @@ impl Component for App {
                 for gallery in [&self.gallery, &self.tag_gallery] {
                     gallery.emit(GalleryMsg::Removed(path.clone()));
                 }
-                self.tags.emit(TagsMsg::Refresh);
+                self.search.emit(SearchMsg::Removed(path));
+                self.search.emit(SearchMsg::Refresh);
                 if w.nav.visible_page().as_ref() == Some(self.detail.widget()) {
                     w.nav.pop();
                 }
@@ -553,8 +595,8 @@ impl Component for App {
                 let empty = lib.is_empty();
                 *self.lib.borrow_mut() = lib;
                 self.gallery.emit(GalleryMsg::Show(None));
-                self.tags.emit(TagsMsg::Refresh);
-                w.top_search.bar.set_search_mode(false);
+                self.search.emit(SearchMsg::Refresh);
+                w.entry.set_text("");
                 w.nav.replace(&[if empty { w.empty.clone() } else { w.top.clone() }]);
             }
             Cmd::Added(total, failed, first) => {

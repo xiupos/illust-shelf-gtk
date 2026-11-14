@@ -36,13 +36,13 @@ meson setup build --prefix ~/.local && meson install -C build
 Choose a folder (Ctrl+O). Its subfolders and symlinks are included; png, jpg, webp, and gif are shown. The folder is not watched, so press Ctrl+R after changing it.
 
 - **Add images** with the + button, by dropping files, or with Ctrl+V. They are copied into the folder.
-- **Tags** with a namespace, like `creator:Name` or `set:Work`, are grouped in the Tags tab.
+- **Tags** with a namespace, like `creator:Name` or `set:Work`, are grouped by namespace in the Search tab, before anything is typed.
 - **Click an image** to edit its title, tags, source URLs, and note. Changes are saved at once.
 - **Move an image to the trash** with Delete, or by right-clicking its thumbnail. Its sidecar goes with it.
 
 | Key | Action |
 |---|---|
-| Start typing, Ctrl+F | Search |
+| Ctrl+F | Search (on a tag's page, also start typing) |
 | Ctrl+R | Reload |
 | Ctrl+Plus / Ctrl+Minus / Ctrl+0 | Thumbnail size |
 | Ctrl+O | Choose folder |
