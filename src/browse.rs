@@ -35,9 +35,8 @@ pub enum GalleryMsg {
     Show(Option<String>),
     Search(String),
     Activated(u32),
-    /// Asks, then `Trashed`
+    /// Asks, then moves the image to the trash
     Trash(PathBuf),
-    Trashed(PathBuf),
     /// Leaves out an image that is gone, keeping the scroll position
     Removed(PathBuf),
 }
@@ -50,7 +49,7 @@ pub enum GalleryOutput {
 }
 
 /// An image was chosen: the gallery's images, and the position of the chosen one
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Open {
     pub paths: Vec<PathBuf>,
     pub index: usize,
@@ -146,24 +145,22 @@ impl Component for Gallery {
         root: &gtk::Stack,
     ) {
         match msg {
-            GalleryMsg::Show(tag) => (self.tag, self.query) = (tag, String::new()),
-            GalleryMsg::Search(query) => self.query = query,
+            GalleryMsg::Show(tag) => {
+                (self.tag, self.query) = (tag, String::new());
+                self.refresh(w);
+            }
+            GalleryMsg::Search(query) => {
+                self.query = query;
+                self.refresh(w);
+            }
             GalleryMsg::Activated(position) => {
                 let open = Open { paths: self.paths.clone(), index: position as usize };
                 let _ = sender.output(GalleryOutput::Open(open));
-                return;
             }
-            GalleryMsg::Trash(path) => {
-                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                ui::ask_trash(root, &name, move || sender.input(GalleryMsg::Trashed(path.clone())));
-                return;
-            }
-            // The app has the galleries leave it out
-            GalleryMsg::Trashed(path) => {
-                let result = ui::trash(&mut self.lib.borrow_mut(), &path);
+            // Then the app has the galleries leave it out
+            GalleryMsg::Trash(path) => ui::ask_trash(root, &self.lib, path, move |path, result| {
                 let _ = sender.output(GalleryOutput::Trashed(path, result));
-                return;
-            }
+            }),
             GalleryMsg::Removed(path) => {
                 if let Some(i) = self.paths.iter().position(|p| *p == path) {
                     self.paths.remove(i);
@@ -174,9 +171,14 @@ impl Component for Gallery {
                     }
                 }
                 ui::show_results(&w.stack, !self.paths.is_empty());
-                return;
             }
         }
+    }
+}
+
+impl Gallery {
+    /// Shows the images of the tag that match the search
+    fn refresh(&mut self, w: &mut GalleryWidgets) {
         let lib = self.lib.borrow();
         self.paths = lib.paths(self.tag.as_deref(), &self.query);
         w.grid.clear();
@@ -413,28 +415,31 @@ impl Component for Search {
                     w.sections.append(&section(space, &row, &sender));
                     w.rows.push(grid);
                 }
-                self.found = library::search_tags(&self.tags, &self.query);
+                self.show_found(w);
             }
             SearchMsg::Search(query) => {
                 self.query = query.trim().to_owned();
-                self.found = library::search_tags(&self.tags, &self.query);
                 // The images of the tags found match too, so the gallery says when nothing does
                 if !self.query.is_empty() {
                     self.gallery.emit(GalleryMsg::Search(query));
                 }
+                self.show_found(w);
             }
-            SearchMsg::Removed(path) => {
-                self.gallery.emit(GalleryMsg::Removed(path));
-                return;
-            }
+            SearchMsg::Removed(path) => self.gallery.emit(GalleryMsg::Removed(path)),
             SearchMsg::Activated(section, position) => {
                 let tags = section.map_or(Some(&self.found), |i| self.sections.get(i).map(|(_, tags)| tags));
                 if let Some(tag) = tags.and_then(|tags| tags.get(position as usize)) {
                     sender.output(SearchOutput::ShowTag(tag.name.clone())).unwrap();
                 }
-                return;
             }
         }
+    }
+}
+
+impl Search {
+    /// Shows the tags that match the search, and the page for it
+    fn show_found(&mut self, w: &mut SearchWidgets) {
+        self.found = library::search_tags(&self.tags, &self.query);
         w.found.clear();
         w.found.extend_from_iter(self.found.iter().map(|tag| Tile::new(&self.lib, tag, false)));
         w.found_row.set_visible(!self.found.is_empty());

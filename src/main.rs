@@ -52,7 +52,7 @@ struct Widgets {
     zoom: gio::SimpleAction,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Msg {
     Reload,
     ChooseFolder,
@@ -85,7 +85,7 @@ enum Cmd {
 // MARK: - Adding images
 
 /// An image to add: a file to copy, or PNG data from the clipboard
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Source {
     File(PathBuf),
     Png(Vec<u8>),
@@ -182,6 +182,195 @@ fn empty_page() -> adw::NavigationPage {
     status_page(&status, &header)
 }
 
+/// All images, and the search, with the tags to browse until something is typed. In a narrow
+/// window the view switcher moves to a bottom bar. Returns the page, its tabs, and the search entry
+fn top_page(
+    gallery: &gtk::Stack,
+    search: &Controller<Search>,
+) -> (adw::NavigationPage, adw::ViewStack, gtk::SearchEntry) {
+    let entry = gtk::SearchEntry::builder()
+        .placeholder_text("Search Titles, Notes, and Tags")
+        .margin_top(12)
+        .margin_bottom(6)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    let s = search.sender().clone();
+    entry.connect_search_changed(move |entry| s.emit(SearchMsg::Search(entry.text().into())));
+    // Escape empties the search, back to the tags: in the entry, which it also leaves, or
+    // anywhere on the tab
+    entry.connect_stop_search(|entry| {
+        entry.set_text("");
+        if let Some(root) = entry.root() {
+            root.set_focus(gtk::Widget::NONE);
+        }
+    });
+    let search_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    search_page.append(&adw::Clamp::builder().maximum_size(400).child(&entry).build());
+    search.widget().set_vexpand(true);
+    search_page.append(search.widget());
+    let e = entry.downgrade();
+    ui::shortcut(&search_page, "Escape", move || match e.upgrade() {
+        Some(e) if !e.text().is_empty() => {
+            e.set_text("");
+            glib::Propagation::Stop
+        }
+        _ => glib::Propagation::Proceed,
+    });
+    let tabs = adw::ViewStack::new();
+    tabs.add_titled_with_icon(gallery, Some("library"), "Library", "image-x-generic-symbolic");
+    tabs.add_titled_with_icon(&search_page, Some("search"), "Search", "system-search-symbolic");
+    let switcher = adw::ViewSwitcher::builder().stack(&tabs).policy(adw::ViewSwitcherPolicy::Wide).build();
+    let header = adw::HeaderBar::builder().title_widget(&switcher).build();
+    let add = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add Images")
+        .action_name("win.add-images")
+        .build();
+    header.pack_start(&add);
+    header.pack_end(&ui::menu_button(&main_menu()));
+    let bar = adw::ViewSwitcherBar::builder().stack(&tabs).build();
+    let view = adw::ToolbarView::builder().content(&tabs).build();
+    view.add_top_bar(&header);
+    view.add_bottom_bar(&bar);
+    let bin = ui::bin(&view);
+    let narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 550sp").unwrap());
+    narrow.add_setter(&bar, "reveal", Some(&true.to_value()));
+    narrow.add_setter(&switcher, "visible", Some(&false.to_value()));
+    bin.add_breakpoint(narrow);
+    (adw::NavigationPage::new(&bin, "Illust Shelf"), tabs, entry)
+}
+
+/// One tag's images, with a search bar
+fn tag_page(gallery: &Controller<Gallery>) -> (adw::NavigationPage, ui::SearchView) {
+    let g = gallery.sender().clone();
+    let search = ui::search_view(&adw::HeaderBar::new(), gallery.widget(), move |query| {
+        g.emit(GalleryMsg::Search(query));
+    });
+    (adw::NavigationPage::new(&ui::bin(&search.view), ""), search)
+}
+
+// MARK: - Actions and keys
+
+/// The window's and the app's actions, for the menus and their keys, and the zoom keys. Returns
+/// the zoom action, whose state is the zoom
+fn add_actions(
+    window: &adw::ApplicationWindow,
+    zoom: u32,
+    sender: &ComponentSender<App>,
+) -> gio::SimpleAction {
+    for (name, msg) in
+        [("reload", Msg::Reload), ("choose-folder", Msg::ChooseFolder), ("add-images", Msg::ChooseImages)]
+    {
+        let s = sender.clone();
+        ui::action(window, name, move || s.input(msg.clone()));
+    }
+    let zoom = gio::SimpleAction::new_stateful("zoom", Some(glib::VariantTy::UINT32), &zoom.to_variant());
+    let s = sender.clone();
+    zoom.connect_activate(move |_, zoom| {
+        s.input(Msg::Zoom(zoom.and_then(|z| z.get()).unwrap_or(DEFAULT_ZOOM)))
+    });
+    window.add_action(&zoom);
+    // A toggle button with this action shows the window's state
+    let fullscreen = gio::SimpleAction::new_stateful("fullscreen", None, &false.to_variant());
+    let w = window.downgrade();
+    fullscreen.connect_activate(move |_, _| {
+        w.upgrade().iter().for_each(|w| w.set_fullscreened(!w.is_fullscreen()));
+    });
+    window.add_action(&fullscreen);
+    window.connect_fullscreened_notify(move |w| fullscreen.set_state(&w.is_fullscreen().to_variant()));
+
+    let app = relm4::main_application();
+    let w = window.downgrade();
+    ui::action(&app, "about", move || {
+        let dialog = adw::AboutDialog::builder()
+            .application_name("Illust Shelf")
+            .application_icon(APP_ID)
+            .version(env!("CARGO_PKG_VERSION"))
+            .comments("Browse and organize illustrations with tags")
+            .website("https://github.com/xiupos/illust-viewer-gtk")
+            .issue_url("https://github.com/xiupos/illust-viewer-gtk/issues")
+            .license_type(gtk::License::MitX11)
+            .build();
+        dialog.present(w.upgrade().as_ref());
+    });
+    let a = app.downgrade();
+    ui::action(&app, "quit", move || a.upgrade().iter().for_each(|a| a.quit()));
+    for (action, keys) in [
+        ("win.reload", "<Control>r"),
+        ("win.choose-folder", "<Control>o"),
+        ("win.fullscreen", "F11"),
+        ("app.quit", "<Control>q"),
+    ] {
+        app.set_accels_for_action(action, &[keys]);
+    }
+    for (trigger, step) in [
+        ("<Control>plus|<Control>equal|<Control>KP_Add", Some(1)),
+        ("<Control>minus|<Control>KP_Subtract", Some(-1)),
+        ("<Control>0|<Control>KP_0", None),
+    ] {
+        let s = sender.clone();
+        ui::shortcut(window, trigger, move || {
+            s.input(Msg::ZoomStep(step));
+            glib::Propagation::Stop
+        });
+    }
+    zoom
+}
+
+/// Calls `f` on the key while `page` is shown
+fn page_shortcut(
+    window: &adw::ApplicationWindow,
+    nav: &adw::NavigationView,
+    page: &adw::NavigationPage,
+    trigger: &str,
+    f: impl Fn() + 'static,
+) {
+    let (nav, page) = (nav.downgrade(), page.downgrade());
+    ui::shortcut(window, trigger, move || {
+        if nav.upgrade().and_then(|n| n.visible_page()) != page.upgrade() {
+            return glib::Propagation::Proceed;
+        }
+        f();
+        glib::Propagation::Stop
+    });
+}
+
+/// The keys of the pages, on the window so that they work wherever the focus is, and files
+/// dropped on the window
+fn add_keys(
+    window: &adw::ApplicationWindow,
+    nav: &adw::NavigationView,
+    top: &adw::NavigationPage,
+    detail: &Controller<Detail>,
+    sender: &ComponentSender<App>,
+) {
+    // A focused text field still gets the arrow keys and Delete first
+    for (key, msg) in [
+        ("F9", detail::Msg::ToggleDetails),
+        ("Left", detail::Msg::Step(-1)),
+        ("Right", detail::Msg::Step(1)),
+        ("Delete|KP_Delete", detail::Msg::Trash),
+    ] {
+        let d = detail.sender().clone();
+        page_shortcut(window, nav, detail.widget(), key, move || d.emit(msg.clone()));
+    }
+    // Ctrl+V adds images, and Ctrl+F goes to the Search tab. A focused text field still pastes
+    // text
+    for (trigger, msg) in [("<Control>v", Msg::Paste), ("<Control>f", Msg::Find)] {
+        let s = sender.clone();
+        page_shortcut(window, nav, top, trigger, move || s.input(msg.clone()));
+    }
+    let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    let s = sender.clone();
+    drop.connect_drop(move |_, value, _, _| {
+        let Ok(files) = value.get::<gdk::FileList>() else { return false };
+        s.input(Msg::Add(sources(&files)));
+        true
+    });
+    window.add_controller(drop);
+}
+
 // MARK: - Window
 
 impl Widgets {
@@ -248,172 +437,14 @@ impl Component for App {
             SearchOutput::Gallery(output) => gallery_msg(output),
         });
 
-        // The top page: all images, and the search, with the tags to browse until something is
-        // typed. In a narrow window the view switcher moves to a bottom bar
-        let entry = gtk::SearchEntry::builder()
-            .placeholder_text("Search Titles, Notes, and Tags")
-            .margin_top(12)
-            .margin_bottom(6)
-            .margin_start(12)
-            .margin_end(12)
-            .build();
-        let s = search.sender().clone();
-        entry.connect_search_changed(move |entry| s.emit(SearchMsg::Search(entry.text().into())));
-        // Escape empties the search, back to the tags: in the entry, which it also leaves, or
-        // anywhere on the tab
-        entry.connect_stop_search(|entry| {
-            entry.set_text("");
-            if let Some(root) = entry.root() {
-                root.set_focus(gtk::Widget::NONE);
-            }
-        });
-        let search_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        search_page.append(&adw::Clamp::builder().maximum_size(400).child(&entry).build());
-        search.widget().set_vexpand(true);
-        search_page.append(search.widget());
-        let e = entry.downgrade();
-        ui::shortcut(&search_page, "Escape", move || match e.upgrade() {
-            Some(e) if !e.text().is_empty() => {
-                e.set_text("");
-                glib::Propagation::Stop
-            }
-            _ => glib::Propagation::Proceed,
-        });
-        let tabs = adw::ViewStack::new();
-        tabs.add_titled_with_icon(gallery.widget(), Some("library"), "Library", "image-x-generic-symbolic");
-        tabs.add_titled_with_icon(&search_page, Some("search"), "Search", "system-search-symbolic");
-        let switcher =
-            adw::ViewSwitcher::builder().stack(&tabs).policy(adw::ViewSwitcherPolicy::Wide).build();
-        let header = adw::HeaderBar::builder().title_widget(&switcher).build();
-        let add = gtk::Button::builder()
-            .icon_name("list-add-symbolic")
-            .tooltip_text("Add Images")
-            .action_name("win.add-images")
-            .build();
-        header.pack_start(&add);
-        header.pack_end(&ui::menu_button(&main_menu()));
-        let bar = adw::ViewSwitcherBar::builder().stack(&tabs).build();
-        let view = adw::ToolbarView::builder().content(&tabs).build();
-        view.add_top_bar(&header);
-        view.add_bottom_bar(&bar);
-        let bin = ui::bin(&view);
-        let narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 550sp").unwrap());
-        narrow.add_setter(&bar, "reveal", Some(&true.to_value()));
-        narrow.add_setter(&switcher, "visible", Some(&false.to_value()));
-        bin.add_breakpoint(narrow);
-        let top = adw::NavigationPage::new(&bin, "Illust Shelf");
-
-        let g = tag_gallery.sender().clone();
-        let tag_search = ui::search_view(&adw::HeaderBar::new(), tag_gallery.widget(), move |query| {
-            g.emit(GalleryMsg::Search(query));
-        });
-        let tag = adw::NavigationPage::new(&ui::bin(&tag_search.view), "");
-
+        let (top, tabs, entry) = top_page(gallery.widget(), &search);
+        let (tag, tag_search) = tag_page(&tag_gallery);
         let nav = adw::NavigationView::new();
         let toasts = adw::ToastOverlay::new();
         toasts.set_child(Some(&nav));
         window.set_content(Some(&toasts));
-
-        // Actions for the menus and their keys
-        for (name, msg) in [
-            ("reload", (|| Msg::Reload) as fn() -> Msg),
-            ("choose-folder", || Msg::ChooseFolder),
-            ("add-images", || Msg::ChooseImages),
-        ] {
-            let s = sender.clone();
-            ui::action(&window, name, move || s.input(msg()));
-        }
-        let zoom = config.zoom.to_variant();
-        let zoom = gio::SimpleAction::new_stateful("zoom", Some(glib::VariantTy::UINT32), &zoom);
-        let s = sender.clone();
-        zoom.connect_activate(move |_, zoom| {
-            s.input(Msg::Zoom(zoom.and_then(|z| z.get()).unwrap_or(DEFAULT_ZOOM)))
-        });
-        window.add_action(&zoom);
-        // A toggle button with this action shows the window's state
-        let fullscreen = gio::SimpleAction::new_stateful("fullscreen", None, &false.to_variant());
-        let w = window.downgrade();
-        fullscreen.connect_activate(move |_, _| {
-            w.upgrade().iter().for_each(|w| w.set_fullscreened(!w.is_fullscreen()));
-        });
-        window.add_action(&fullscreen);
-        window.connect_fullscreened_notify(move |w| fullscreen.set_state(&w.is_fullscreen().to_variant()));
-
-        let app = relm4::main_application();
-        let w = window.downgrade();
-        ui::action(&app, "about", move || {
-            let dialog = adw::AboutDialog::builder()
-                .application_name("Illust Shelf")
-                .application_icon(APP_ID)
-                .version(env!("CARGO_PKG_VERSION"))
-                .comments("Browse and organize illustrations with tags")
-                .website("https://github.com/xiupos/illust-viewer-gtk")
-                .issue_url("https://github.com/xiupos/illust-viewer-gtk/issues")
-                .license_type(gtk::License::MitX11)
-                .build();
-            dialog.present(w.upgrade().as_ref());
-        });
-        let a = app.downgrade();
-        ui::action(&app, "quit", move || a.upgrade().iter().for_each(|a| a.quit()));
-        for (action, keys) in [
-            ("win.reload", "<Control>r"),
-            ("win.choose-folder", "<Control>o"),
-            ("win.fullscreen", "F11"),
-            ("app.quit", "<Control>q"),
-        ] {
-            app.set_accels_for_action(action, &[keys]);
-        }
-        for (trigger, step) in [
-            ("<Control>plus|<Control>equal|<Control>KP_Add", Some(1)),
-            ("<Control>minus|<Control>KP_Subtract", Some(-1)),
-            ("<Control>0|<Control>KP_0", None),
-        ] {
-            let s = sender.clone();
-            ui::shortcut(&window, trigger, move || {
-                s.input(Msg::ZoomStep(step));
-                glib::Propagation::Stop
-            });
-        }
-
-        // On the window, so that they work wherever the focus is. A focused text field still gets
-        // the arrow keys and Delete first
-        for (key, msg) in [
-            ("F9", (|| detail::Msg::ToggleDetails) as fn() -> detail::Msg),
-            ("Left", || detail::Msg::Step(-1)),
-            ("Right", || detail::Msg::Step(1)),
-            ("Delete|KP_Delete", || detail::Msg::Trash),
-        ] {
-            let (n, page, d) = (nav.downgrade(), detail.widget().downgrade(), detail.sender().clone());
-            ui::shortcut(&window, key, move || {
-                if n.upgrade().and_then(|n| n.visible_page()) != page.upgrade() {
-                    return glib::Propagation::Proceed;
-                }
-                d.emit(msg());
-                glib::Propagation::Stop
-            });
-        }
-
-        // Ctrl+V adds images, and Ctrl+F goes to the Search tab, on the top page. They are on the
-        // window so that they work with nothing focused; a focused text field still pastes text.
-        // Files dropped on the window are added too
-        for (trigger, msg) in [("<Control>v", (|| Msg::Paste) as fn() -> Msg), ("<Control>f", || Msg::Find)] {
-            let (s, n, t) = (sender.clone(), nav.downgrade(), top.downgrade());
-            ui::shortcut(&window, trigger, move || {
-                if n.upgrade().and_then(|n| n.visible_page()) != t.upgrade() {
-                    return glib::Propagation::Proceed;
-                }
-                s.input(msg());
-                glib::Propagation::Stop
-            });
-        }
-        let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
-        let s = sender.clone();
-        drop.connect_drop(move |_, value, _, _| {
-            let Ok(files) = value.get::<gdk::FileList>() else { return false };
-            s.input(Msg::Add(sources(&files)));
-            true
-        });
-        window.add_controller(drop);
+        let zoom = add_actions(&window, config.zoom, &sender);
+        add_keys(&window, &nav, &top, &detail, &sender);
 
         let model = App { config, lib, generation: 0, gallery, search, tag_gallery, detail };
         let (loading, empty) = (loading_page(), empty_page());
@@ -500,10 +531,7 @@ impl Component for App {
                 sender.spawn_oneshot_command(move || {
                     let errors = sources.iter().filter_map(|source| {
                         let (name, result) = match source {
-                            Source::File(f) => (
-                                f.file_name().unwrap_or_default().to_string_lossy(),
-                                library::import(&folder, f, &now),
-                            ),
+                            Source::File(f) => (ui::file_name(f), library::import(&folder, f, &now)),
                             Source::Png(png) => {
                                 ("Pasted image".into(), library::import_png(&folder, png, &now))
                             }

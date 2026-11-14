@@ -3,7 +3,7 @@
 use crate::library::{self, Meta};
 use crate::ui::{self, Lib};
 use adw::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gio, glib};
 use relm4::prelude::*;
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -74,7 +74,7 @@ pub enum Target {
     Sidecar,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Msg {
     /// Shows the image at the position in the gallery
     Show(Vec<PathBuf>, usize),
@@ -89,9 +89,8 @@ pub enum Msg {
     /// The text of the row that adds a tag, to suggest tags for
     Typed(String),
     Launch(Target),
-    /// Asks, then `Trashed`
+    /// Asks, then moves the image to the trash
     Trash,
-    Trashed,
 }
 
 #[derive(Debug)]
@@ -130,11 +129,8 @@ impl Detail {
         self.known = lib.tags().into_iter().map(|tag| tag.name).collect();
         drop(lib);
 
-        let name = |p: Option<&Path>| {
-            p.and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned()
-        };
-        page.set_title(&name(Some(&file)));
-        w.folder.set_subtitle(&name(file.parent()));
+        page.set_title(&ui::file_name(&file));
+        w.folder.set_subtitle(&file.parent().map(ui::file_name).unwrap_or_default());
         w.path.set_subtitle(&file.to_string_lossy());
         // Until the image is decoded
         w.dimensions.set_visible(false);
@@ -233,7 +229,7 @@ impl Component for Detail {
         let image = gtk::Overlay::builder().child(&picture).css_classes(["image"]).build();
         image.add_overlay(&controls);
 
-        // The pane. Edits made by `load` are not the user's
+        // The pane
         let loading = Rc::<Cell<bool>>::default();
         let pane = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -312,13 +308,13 @@ impl Component for Detail {
         menu.append(Some("Edit Sidecar in Text Editor"), Some("detail.edit-sidecar"));
         let actions = gio::SimpleActionGroup::new();
         for (name, msg) in [
-            ("open-image", (|| Msg::Launch(Target::Image)) as fn() -> Msg),
-            ("open-folder", || Msg::Launch(Target::Folder)),
-            ("edit-sidecar", || Msg::Launch(Target::Sidecar)),
-            ("trash", || Msg::Trash),
+            ("open-image", Msg::Launch(Target::Image)),
+            ("open-folder", Msg::Launch(Target::Folder)),
+            ("edit-sidecar", Msg::Launch(Target::Sidecar)),
+            ("trash", Msg::Trash),
         ] {
             let s = sender.clone();
-            ui::action(&actions, name, move || s.input(msg()));
+            ui::action(&actions, name, move || s.input(msg.clone()));
         }
         page.insert_action_group("detail", Some(&actions));
         let fullscreen = gtk::ToggleButton::builder()
@@ -488,15 +484,9 @@ impl Component for Detail {
                     }
                 }
             }
-            Msg::Trash => {
-                let name = self.path().file_name().unwrap_or_default().to_string_lossy();
-                ui::ask_trash(page, &name, move || sender.input(Msg::Trashed));
-            }
-            Msg::Trashed => {
-                let path = self.path().to_owned();
-                let result = ui::trash(&mut self.lib.borrow_mut(), &path);
+            Msg::Trash => ui::ask_trash(page, &self.lib, self.path().to_owned(), move |path, result| {
                 let _ = sender.output(Output::Trashed(path, result));
-            }
+            }),
         }
     }
 
@@ -508,17 +498,7 @@ impl Component for Detail {
         _: &adw::NavigationPage,
     ) {
         if path == self.path() {
-            let texture = image.map(|image| {
-                let (width, height) = (image.width() as i32, image.height() as i32);
-                let bytes = glib::Bytes::from_owned(image.into_raw());
-                gdk::MemoryTexture::new(
-                    width,
-                    height,
-                    gdk::MemoryFormat::R8g8b8a8,
-                    &bytes,
-                    width as usize * 4,
-                )
-            });
+            let texture = image.map(ui::texture);
             w.picture.set_paintable(texture.as_ref());
             if let Some(texture) = &texture {
                 w.dimensions.set_subtitle(&format!("{} × {}", texture.width(), texture.height()));

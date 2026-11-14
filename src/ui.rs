@@ -2,8 +2,9 @@
 
 use crate::library::Library;
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// Shared by the components. The app replaces its content on reload
@@ -12,6 +13,18 @@ pub type Lib = Rc<RefCell<Library>>;
 /// The local time in ISO 8601 with an offset, for `added`
 pub fn now() -> String {
     glib::DateTime::now_local().and_then(|d| d.format("%FT%T%:z")).map(|s| s.to_string()).unwrap_or_default()
+}
+
+/// The last part of a path, to show; "" if there is none
+pub fn file_name(path: &Path) -> String {
+    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+/// A decoded image, to show
+pub fn texture(image: image::RgbaImage) -> gdk::MemoryTexture {
+    let (width, height) = (image.width() as i32, image.height() as i32);
+    let bytes = glib::Bytes::from_owned(image.into_raw());
+    gdk::MemoryTexture::new(width, height, gdk::MemoryFormat::R8g8b8a8, &bytes, width as usize * 4)
 }
 
 // MARK: - Actions
@@ -60,12 +73,13 @@ pub fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 // MARK: - Search
 
 /// A search entry in a search bar under the header, above the content. The bar opens from a
-/// header button, Ctrl+F, or typing. `search` gets the text as it changes
+/// header button, Ctrl+F, or typing
 pub struct SearchView {
     pub view: adw::ToolbarView,
     pub bar: gtk::SearchBar,
 }
 
+/// `search` gets the text as it changes
 pub fn search_view(
     header: &adw::HeaderBar,
     content: &impl IsA<gtk::Widget>,
@@ -108,28 +122,38 @@ pub fn show_results(stack: &gtk::Stack, any: bool) {
 
 // MARK: - Trash
 
-/// Asks whether to move the image `name` and its sidecar to the trash, then calls `trash`
-pub fn ask_trash(parent: &impl IsA<gtk::Widget>, name: &str, trash: impl Fn() + 'static) {
+/// Asks whether to move the image and its sidecar to the trash, then does, and calls `done` with
+/// the image and the result
+pub fn ask_trash(
+    parent: &impl IsA<gtk::Widget>,
+    lib: &Lib,
+    path: PathBuf,
+    done: impl Fn(PathBuf, Result<(), String>) + 'static,
+) {
     let dialog = adw::AlertDialog::new(
         Some("Move to Trash?"),
-        Some(&format!("“{name}” and its sidecar will be moved to the trash.")),
+        Some(&format!("“{}” and its sidecar will be moved to the trash.", file_name(&path))),
     );
     dialog.add_responses(&[("cancel", "_Cancel"), ("trash", "_Move to Trash")]);
     dialog.set_response_appearance("trash", adw::ResponseAppearance::Destructive);
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
-    dialog.connect_response(Some("trash"), move |_, _| trash());
+    let lib = lib.clone();
+    dialog.connect_response(Some("trash"), move |_, _| {
+        let result = trash(&mut lib.borrow_mut(), &path);
+        done(path.clone(), result);
+    });
     dialog.present(Some(parent));
 }
 
 /// Moves the image and its sidecar to the trash, not deleting them, so that it can be undone in
 /// Files, and leaves the image out of the library. Returns what to tell the user
-pub fn trash(lib: &mut Library, path: &std::path::Path) -> Result<(), String> {
+fn trash(lib: &mut Library, path: &Path) -> Result<(), String> {
     // Not the folder itself, which is the file of the empty ID
     if lib.get(path).is_none() {
         return Err("The image is gone".into());
     }
-    let trash = |p: &std::path::Path| match p.exists() {
+    let trash = |p: &Path| match p.exists() {
         true => gio::File::for_path(p).trash(gio::Cancellable::NONE),
         false => Ok(()),
     };
@@ -156,7 +180,7 @@ pub fn thumbnail() -> gtk::Picture {
 /// fill the row
 pub fn tile_grid(grid: &gtk::GridView) {
     grid.set_single_click_activate(true);
-    // The default is 7
+    // GTK's default is 7
     grid.set_max_columns(64);
     // Rows as tall as a square thumbnail at the stretched width, not at the minimum
     grid.set_vscroll_policy(gtk::ScrollablePolicy::Natural);
