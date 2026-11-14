@@ -69,8 +69,7 @@ impl Meta {
 
 #[derive(Clone, Debug)]
 pub struct Item {
-    /// The image's path relative to the library's folder; also the item's ID. It stays the same
-    /// when the folder moves, and needs no absolute paths, which some platforms do not have
+    /// The image's path relative to the library's folder, which is its ID
     pub path: PathBuf,
     pub meta: Meta,
     /// false if the sidecar cannot be read as a `Meta` or its `v` is not 1. It is then never written
@@ -405,7 +404,7 @@ fn ensure_thumb(image: &Path, thumb: &Path) -> bool {
     }
 }
 
-/// Decodes an image by its content, as the extension may be wrong, with its EXIF orientation
+/// Decodes an image by its content, as the extension may be wrong, and reads its EXIF orientation
 fn decode_oriented(path: &Path) -> io::Result<(image::DynamicImage, image::metadata::Orientation)> {
     use image::ImageDecoder;
     let mut decoder =
@@ -415,8 +414,7 @@ fn decode_oriented(path: &Path) -> io::Result<(image::DynamicImage, image::metad
     Ok((img, orientation))
 }
 
-/// Decodes an image by its content, as the extension may be wrong, and turns it upright as its
-/// EXIF orientation says
+/// Decodes an image, turned upright as its EXIF orientation says
 pub fn decode(path: &Path) -> io::Result<image::DynamicImage> {
     let (mut img, orientation) = decode_oriented(path)?;
     img.apply_orientation(orientation);
